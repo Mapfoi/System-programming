@@ -155,7 +155,7 @@ internal sealed class SpriteWindow : IDisposable
         _windowHandle = Win32Interop.CreateWindowEx(
             0,
             WindowClassName,
-            "Системное программирование: управление спрайтом",
+            "Sprite controller",
             Win32Interop.WS_OVERLAPPEDWINDOW,
             Win32Interop.CW_USEDEFAULT,
             Win32Interop.CW_USEDEFAULT,
