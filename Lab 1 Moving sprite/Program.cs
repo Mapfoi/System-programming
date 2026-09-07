@@ -33,6 +33,9 @@ internal static class Program
 
     private static void ShowFatalError(string message)
     {
+        // hWnd = Zero — нет родительского окна
+        // lpText — текст ошибки; lpCaption — заголовок
+        // uType = MB_ICONERROR — иконка ошибки
         Win32Interop.MessageBoxW(
             IntPtr.Zero,
             message,

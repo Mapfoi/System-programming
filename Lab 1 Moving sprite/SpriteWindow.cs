@@ -43,20 +43,38 @@ internal sealed class SpriteWindow : IDisposable
     /// </summary>
     internal void Run()
     {
+        // hWnd — созданное окно
+        // nCmdShow = SW_SHOW — сделать окно видимым
         Win32Interop.ShowWindow(_windowHandle, Win32Interop.SW_SHOW);
+
+        // hWnd — перерисовать клиентскую область после показа
         Win32Interop.UpdateWindow(_windowHandle);
 
         Win32Interop.MSG msg;
 
-        while (Win32Interop.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+        while (true)
         {
-            // Акселераторы обрабатываются первыми: комбинации выхода не должны попадать в WM_KEYDOWN
-            if (Win32Interop.TranslateAccelerator(_windowHandle, _acceleratorTable.Handle, ref msg) != 0)
+            // lpMsg — куда записать сообщение
+            // hWnd = Zero — все окна потока
+            // wMsgFilterMin/Max = 0 — без фильтра
+            if (Win32Interop.GetMessage(out msg, IntPtr.Zero, 0, 0) <= 0)
+            {
+                break;
+            }
+
+            // hWnd — окно-получатель команды
+            // hAccTable — таблица акселераторов
+            // lpMsg — сообщение из очереди (до TranslateMessage)
+            if (Win32Interop.TranslateAccelerator(
+                    _windowHandle, _acceleratorTable.Handle, ref msg) != 0)
             {
                 continue;
             }
 
+            // lpMsg — виртуальные клавиши -> WM_CHAR
             Win32Interop.TranslateMessage(ref msg);
+
+            // lpMsg — передать сообщение в WndProc
             Win32Interop.DispatchMessage(ref msg);
         }
     }
@@ -84,6 +102,7 @@ internal sealed class SpriteWindow : IDisposable
             return s_activeInstance.WindowProcedure(hWnd, msg, wParam, lParam);
         }
 
+        // hWnd, msg, wParam, lParam — прочие сообщения без активного окна
         return Win32Interop.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
@@ -99,6 +118,7 @@ internal sealed class SpriteWindow : IDisposable
             cbWndExtra = 0,
             hInstance = Win32Interop.GetModuleHandle(null),
             hIcon = IntPtr.Zero,
+            // hInstance = Zero — стандартный курсор; lpCursorName = IDC_ARROW
             hCursor = Win32Interop.LoadCursor(IntPtr.Zero, Win32Interop.IDC_ARROW),
             hbrBackground = (IntPtr)(Win32Interop.COLOR_WINDOW + 1),
             lpszMenuName = null!,
@@ -106,6 +126,8 @@ internal sealed class SpriteWindow : IDisposable
             hIconSm = IntPtr.Zero
         };
 
+        // lpwcx — заполненная WNDCLASSEX
+        // (имя класса, WndProc, кисть фона, курсор)
         if (Win32Interop.RegisterClassEx(ref wndClass) == 0)
         {
             uint error = Win32Interop.GetLastError();
@@ -121,6 +143,15 @@ internal sealed class SpriteWindow : IDisposable
     /// <summary>Создаёт HWND отдельного окна — контейнер для спрайта и ввода WASD.</summary>
     private void CreateMainWindow()
     {
+        // dwExStyle = 0 — без расширенных стилей
+        // lpClassName — имя класса из RegisterClassEx
+        // lpWindowName — заголовок окна
+        // dwStyle = WS_OVERLAPPEDWINDOW — обычное окно
+        // x, y = CW_USEDEFAULT — позицию выбирает система
+        // nWidth, nHeight — начальный размер (800×600)
+        // hWndParent, hMenu = Zero — нет родителя и меню
+        // hInstance — модуль текущего процесса
+        // lpParam = Zero — нет доп. данных создания
         _windowHandle = Win32Interop.CreateWindowEx(
             0,
             WindowClassName,
@@ -162,17 +193,19 @@ internal sealed class SpriteWindow : IDisposable
                     return HandlePaint(hWnd);
 
                 case Win32Interop.WM_DESTROY:
-                    // PostQuitMessage завершает цикл GetMessage в Run()
+                    // nExitCode = 0 — код выхода для GetMessage
                     Win32Interop.PostQuitMessage(0);
                     return IntPtr.Zero;
 
                 default:
+                    // hWnd, msg, wParam, lParam — прочие сообщения
                     return Win32Interop.DefWindowProc(hWnd, msg, wParam, lParam);
             }
         }
         catch (Exception ex)
         {
-            // Исключение внутри WndProc без try/catch приводит к 0xE0434352 при вызове из нативного кода
+            // hWnd — окно-владелец; lpText — текст; lpCaption — заголовок;
+            // uType = MB_ICONERROR — иконка ошибки
             Win32Interop.MessageBoxW(hWnd, ex.ToString(), "Ошибка в обработчике окна", Win32Interop.MB_ICONERROR);
             return IntPtr.Zero;
         }
@@ -183,11 +216,13 @@ internal sealed class SpriteWindow : IDisposable
     /// </summary>
     private IntPtr HandleKeyDown(IntPtr wParam)
     {
+        // wParam — виртуальный код клавиши (WASD)
         int virtualKey = wParam.ToInt32();
 
         if (_sprite.TryMove(virtualKey))
         {
-            // InvalidateRect ставит WM_PAINT в очередь — рисование не блокирует обработку ввода
+            // hWnd — окно; lpRect = Zero — вся клиентская область
+            // bErase = true — стереть фон перед WM_PAINT
             Win32Interop.InvalidateRect(_windowHandle, IntPtr.Zero, true);
         }
 
@@ -197,11 +232,12 @@ internal sealed class SpriteWindow : IDisposable
     /// <summary>WM_COMMAND от TranslateAccelerator несёт ID команды в младшем слове wParam.</summary>
     private IntPtr HandleCommand(IntPtr wParam)
     {
+        // младшее слово wParam — ID из ACCEL.cmd
         ushort commandId = (ushort)(wParam.ToInt32() & 0xFFFF);
 
         if (AcceleratorTable.IsExitCommand(commandId))
         {
-            // DestroyWindow порождает WM_DESTROY, где вызывается PostQuitMessage
+            // hWnd — уничтожить окно (-> WM_DESTROY)
             Win32Interop.DestroyWindow(_windowHandle);
         }
 
@@ -211,9 +247,13 @@ internal sealed class SpriteWindow : IDisposable
     /// <summary>Пересчитывает границы спрайта при изменении размеров окна.</summary>
     private IntPtr HandleSize(IntPtr lParam)
     {
+        // младшее слово lParam — новая ширина
+        // старшее слово lParam — новая высота
         int width = lParam.ToInt32() & 0xFFFF;
         int height = (lParam.ToInt32() >> 16) & 0xFFFF;
         _sprite.UpdateClientSize(width, height);
+
+        // hWnd — окно; lpRect = Zero — вся область; bErase = true
         Win32Interop.InvalidateRect(_windowHandle, IntPtr.Zero, true);
         return IntPtr.Zero;
     }
@@ -226,6 +266,8 @@ internal sealed class SpriteWindow : IDisposable
             rgbReserved = new byte[32]
         };
 
+        // hWnd — окно
+        // lpPaint — область перерисовки (заполняет ОС)
         IntPtr hdc = Win32Interop.BeginPaint(hWnd, ref paintStruct);
 
         Win32Interop.RECT spriteRect = new Win32Interop.RECT
@@ -236,11 +278,17 @@ internal sealed class SpriteWindow : IDisposable
             bottom = _sprite.Y + SpriteController.SpriteHeight
         };
 
-        // COLORREF 0x000000FF — синий в формате BGR, как ожидает CreateSolidBrush
+        // color = 0x000000FF — COLORREF BGR (синий)
         IntPtr brush = Win32Interop.CreateSolidBrush(0x000000FF);
+
+        // hDC — контекст из BeginPaint
+        // lprc — прямоугольник спрайта; hbr — кисть
         Win32Interop.FillRect(hdc, ref spriteRect, brush);
+
+        // hObject — GDI-кисть после FillRect
         Win32Interop.DeleteObject(brush);
 
+        // hWnd, lpPaint — конец BeginPaint/EndPaint
         Win32Interop.EndPaint(hWnd, ref paintStruct);
         return IntPtr.Zero;
     }

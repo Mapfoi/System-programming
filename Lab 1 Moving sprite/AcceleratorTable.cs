@@ -15,36 +15,66 @@ internal sealed class AcceleratorTable : IDisposable
     /// <summary>ID команды выхода: Escape — аварийный выход без дополнительных модификаторов.</summary>
     internal const ushort CmdExitEscape = 1003;
 
+    /// <summary>ID команды выхода: Ctrl+Alt+Q — тройное сочетание (два модификатора + клавиша).</summary>
+    internal const ushort CmdExitCtrlAltQ = 1004;
+
+    /// <summary>ID команды выхода: Ctrl+Shift+E — второе тройное сочетание без пересечения с WASD.</summary>
+    internal const ushort CmdExitCtrlShiftE = 1005;
+
     private IntPtr _handle;
 
     /// <summary>
-    /// Создаёт и регистрирует таблицу из трёх комбинаций выхода.
+    /// Создаёт и регистрирует таблицу комбинаций выхода (включая два тройных сочетания).
     /// Все сочетания проходят через TranslateAccelerator и приводят к WM_COMMAND.
     /// </summary>
     internal AcceleratorTable()
     {
         Win32Interop.ACCEL[] entries =
         [
+            // fVirt: FVIRTKEY|FCONTROL; key: Q; cmd: 1001
+            // сочетание Ctrl+Q
             new Win32Interop.ACCEL
             {
                 fVirt = (byte)(Win32Interop.FVIRTKEY | Win32Interop.FCONTROL),
                 key = Win32Interop.VK_Q,
                 cmd = CmdExitCtrlQ
             },
+            // fVirt: FVIRTKEY|FALT; key: X; cmd: 1002
+            // сочетание Alt+X
             new Win32Interop.ACCEL
             {
                 fVirt = (byte)(Win32Interop.FVIRTKEY | Win32Interop.FALT),
                 key = Win32Interop.VK_X,
                 cmd = CmdExitAltX
             },
+            // fVirt: FVIRTKEY; key: Escape; cmd: 1003
+            // сочетание Escape
             new Win32Interop.ACCEL
             {
                 fVirt = Win32Interop.FVIRTKEY,
                 key = Win32Interop.VK_ESCAPE,
                 cmd = CmdExitEscape
+            },
+            // fVirt: FVIRTKEY|FCONTROL|FALT; key: Q; cmd: 1004
+            // сочетание Ctrl+Alt+Q
+            new Win32Interop.ACCEL
+            {
+                fVirt = (byte)(Win32Interop.FVIRTKEY | Win32Interop.FCONTROL | Win32Interop.FALT),
+                key = Win32Interop.VK_Q,
+                cmd = CmdExitCtrlAltQ
+            },
+            // fVirt: FVIRTKEY|FCONTROL|FSHIFT; key: E; cmd: 1005
+            // сочетание Ctrl+Shift+E
+            new Win32Interop.ACCEL
+            {
+                fVirt = (byte)(Win32Interop.FVIRTKEY | Win32Interop.FCONTROL | Win32Interop.FSHIFT),
+                key = Win32Interop.VK_E,
+                cmd = CmdExitCtrlShiftE
             }
         ];
 
+        // paccel — массив ACCEL
+        // cAccel — число записей в таблице
         _handle = Win32Interop.CreateAcceleratorTable(entries, entries.Length);
 
         if (_handle == IntPtr.Zero)
@@ -64,7 +94,8 @@ internal sealed class AcceleratorTable : IDisposable
     /// <returns>True, если команда — запрос на завершение приложения.</returns>
     internal static bool IsExitCommand(ushort commandId)
     {
-        return commandId is CmdExitCtrlQ or CmdExitAltX or CmdExitEscape;
+        return commandId is CmdExitCtrlQ or CmdExitAltX or CmdExitEscape
+            or CmdExitCtrlAltQ or CmdExitCtrlShiftE;
     }
 
     /// <summary>Освобождает таблицу — WinAPI не делает это автоматически при завершении процесса.</summary>
@@ -72,6 +103,7 @@ internal sealed class AcceleratorTable : IDisposable
     {
         if (_handle != IntPtr.Zero)
         {
+            // hAccel — дескриптор из CreateAcceleratorTable
             Win32Interop.DestroyAcceleratorTable(_handle);
             _handle = IntPtr.Zero;
         }

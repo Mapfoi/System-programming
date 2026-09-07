@@ -103,8 +103,10 @@ internal static class Win32Interop
     internal const int VK_ESCAPE = 0x1B;
     internal const int VK_Q = 0x51;
     internal const int VK_X = 0x58;
+    internal const int VK_E = 0x45;
 
     internal const byte FVIRTKEY = 0x01;
+    internal const byte FSHIFT = 0x04;
     internal const byte FCONTROL = 0x08;
     internal const byte FALT = 0x10;
 
