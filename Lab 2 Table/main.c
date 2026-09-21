@@ -41,7 +41,6 @@ static int g_clientH;
 /* Текущая высота шрифта в пикселях (после FitFontToClient) */
 static int g_fontPx = 16;
 
-/* Asks the user for table rows and columns; validates in the console. */
 static int ReadDimensions(void)
 {
     AllocConsole();
@@ -296,7 +295,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     switch (msg) {
     case WM_SIZE:
-        /* Новые размеры клиента - пересчёт шрифта — запрос перерисовки */
+        /* Новые размеры клиента - пересчёт шрифта - запрос перерисовки */
         g_clientW = LOWORD(lParam);
         g_clientH = HIWORD(lParam);
 
