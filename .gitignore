@@ -25,9 +25,14 @@ artifacts/
 *.nupkg
 *.snupkg
 
-# Rider / VS Code
+# Rider / VS Code / CLion
 .idea/
 .vscode/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
 
 # OS
 Thumbs.db
