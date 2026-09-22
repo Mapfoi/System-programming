@@ -1,376 +1,258 @@
-#define UNICODE
-#define _UNICODE
 #define WIN32_LEAN_AND_MEAN
-
-#include <stdio.h>
-#include <stdlib.h>
 #include <windows.h>
 
-#define WINDOW_CLASS_NAME L"Lab2_Table"
-#define WINDOW_TITLE      L"Table"
+// Число строк таблицы
+#define ROWS 4
 
-/* Пределы размерности, которую можно ввести */
-#define MAX_ROWS 32
-#define MAX_COLS 32
+// Число столбцов таблицы
+#define COLS 3
 
-/* Минимальная высота шрифта при подгонке, px */
-#define MIN_FONT_PX 8
+// https://ru.wikipedia.org/wiki/Шрифт
+static const wchar_t *cellText[ROWS][COLS] = {
+    {L"Шрифт", L"Рисованный и наборный", L"Гарнитура"},
+    {L"Рисунок букв и знаков",
+     L"Шрифты делятся на рисованные (англ. Lettering) и наборные (англ. Type).",
+     L"Группа шрифтов разных начертаний и кеглей, имеющих одинаковый стиль, называется гарнитурой."},
+    {L"Пиктография",
+     L"Первой письменной формой передачи мысли была пиктография — рисунки на стенах пещер и на скалах.",
+     L"Первый алфавит литературно-фонетического письма создали финикийцы. Этот алфавит стал первоисточником большинства алфавитов мира — греческого, латинского, кириллического и прочих."},
+    {L"Унциал",
+     L"В VI веке появляется новый стиль письма — унциал.",
+     L"В XV веке типографы изготовили новые печатные шрифты. Среди пионеров были Николя Жансон, Альд Мануций и Клод Гарамон. Шрифт Гарамона стал основой для множества современных шрифтов."}
+};
 
-/* Максимальная высота шрифта, px */
-#define MAX_FONT_PX 36
+// Гарнитуры ячеек: Roman, Swiss, Modern, Script
+static const wchar_t *fontNames[] = {
+    L"Times New Roman", L"Arial", L"Courier New", L"Segoe Script"
+};
 
-/* Отступ текста от границ ячейки, px */
-#define CELL_PAD 4
+// Семейство шрифта для той же ячейки
+static const DWORD fontFamilies[] = {FF_ROMAN, FF_SWISS, FF_MODERN, FF_SCRIPT};
 
-/* Макс. длина текста одной ячейки (автозаполнение) */
-#define CELL_TEXT_MAX 192
+// Ширина и высота клиента, текущий кегль в пикселях
+static int clientWidth, clientHeight, fontSizePx = 16;
 
-/* Число строк и столбцов (задаёт пользователь) */
-static int g_rows;
-static int g_cols;
-
-/* Буфер ячеек. Заполняется InitCells() после ввода размеров. */
-static wchar_t g_cells[MAX_ROWS][MAX_COLS][CELL_TEXT_MAX];
-
-/* Ширина клиентской области окна */
-static int g_clientW;
-
-/* Высота клиентской области */
-static int g_clientH;
-
-/* Текущая высота шрифта в пикселях (после FitFontToClient) */
-static int g_fontPx = 16;
-
-static int ReadDimensions(void)
+// Логический шрифт ячейки: своя гарнитура и своё начертание
+static HFONT CellFont(int row, int column, int fontSize)
 {
-    AllocConsole();
-    freopen("CONIN$", "r", stdin);
-    freopen("CONOUT$", "w", stdout);
-    freopen("CONOUT$", "w", stderr);
 
-    for (;;) {
-        int n;
+    // Индекс ячейки выбирает гарнитуру, жирность и курсив
+    int cellIndex = row * COLS + column;
 
-        wprintf(L"Enter number of rows (1..%d): ", MAX_ROWS);
-        n = wscanf(L"%d", &g_rows);
-        while (getwchar() != L'\n' && !feof(stdin))
-            ;
-
-        if (n != 1 || g_rows < 1 || g_rows > MAX_ROWS) {
-            wprintf(L"Invalid input. Try again.\n");
-            continue;
-        }
-        break;
-    }
-
-    for (;;) {
-        int n;
-
-        wprintf(L"Enter number of columns (1..%d): ", MAX_COLS);
-        n = wscanf(L"%d", &g_cols);
-        while (getwchar() != L'\n' && !feof(stdin))
-            ;
-
-        if (n != 1 || g_cols < 1 || g_cols > MAX_COLS) {
-            wprintf(L"Invalid input. Try again.\n");
-            continue;
-        }
-        break;
-    }
-
-    wprintf(L"Table %d x %d. Opening window...\n", g_rows, g_cols);
-    FreeConsole();
-    return 1;
+    // Отрицательная высота — размер символа в пикселях, контур TrueType
+    return CreateFontW(-fontSize, 0, 0, 0,
+        (cellIndex % 2) ? FW_BOLD : FW_NORMAL, (cellIndex % 3) == 0,
+        0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | fontFamilies[cellIndex % 4],
+        fontNames[cellIndex % 4]);
 }
 
-/* Заполняет все ячейки: координата + lorem разной длины. */
-static void InitCells(void)
+// Высота текста ячейки с переносом по словам, без рисования
+static int MeasureCellHeight(HDC deviceContext, int row, int column,
+                             int columnWidth, int fontSize)
 {
-    static const wchar_t lorem[] =
-        L"Lorem ipsum dolor sit amet, consectetur adipiscing elit, "
-        L"sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ";
-    const int loremLen = (int)(sizeof(lorem) / sizeof(lorem[0]) - 1);
-    int r, c;
 
-    for (r = 0; r < g_rows; ++r) {
-        for (c = 0; c < g_cols; ++c) {
-            int idx = r * g_cols + c;
-            int bodyLen = 12 + (idx * 23) % 100;
-            int prefixLen;
-            int i;
-            wchar_t* dst = g_cells[r][c];
+    // Считать тем же шрифтом, которым ячейка будет нарисована
+    HFONT font = CellFont(row, column, fontSize);
+    HFONT previousFont = (HFONT)SelectObject(deviceContext, font);
 
-            prefixLen = wsprintfW(dst, L"[%d,%d] ", r + 1, c + 1);
-            if (prefixLen < 0)
-                prefixLen = 0;
+    // Ширина столбца без полей; высоту заполнит DrawText
+    RECT measuredRect = {0, 0, columnWidth > 8 ? columnWidth - 8 : 1, 0};
 
-            for (i = 0; i < bodyLen && prefixLen + i < CELL_TEXT_MAX - 1; ++i)
-                dst[prefixLen + i] = lorem[i % loremLen];
+    // DT_CALCRECT только измеряет прямоугольник, DT_WORDBREAK переносит слова
+    DrawTextW(deviceContext, cellText[row][column], -1, &measuredRect,
+              DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
 
-            dst[prefixLen + i] = L'\0';
-        }
-    }
+    // Вернуть контексту прежний шрифт и удалить созданный
+    SelectObject(deviceContext, previousFont);
+    DeleteObject(font);
+
+    // Высота текста плюс поля сверху и снизу
+    return measuredRect.bottom + 8;
 }
 
-/* Создаёт логический шрифт заданной высоты в пикселях. */
-static HFONT CreateTableFont(int heightPx)
+// Высота строки — максимум среди ячеек этой строки
+static int MeasureRowHeight(HDC deviceContext, int row, int columnWidth, int fontSize)
 {
-    LOGFONTW lf = { 0 };
+    int column;
+    int maxCellHeight = 1;
+    int cellHeight;
 
-    /* Отрицательный lfHeight — высота символа в пикселях */
-    lf.lfHeight = -heightPx;
-    lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    lstrcpyW(lf.lfFaceName, L"Segoe UI");
-    return CreateFontIndirectW(&lf);
+    // Строка должна вместить самую высокую ячейку
+    for (column = 0; column < COLS; ++column)
+        if ((cellHeight = MeasureCellHeight(deviceContext, row, column,
+                                            columnWidth, fontSize)) > maxCellHeight)
+            maxCellHeight = cellHeight;
+    return maxCellHeight;
 }
 
-/* Высота ячейки: DrawText с DT_CALCRECT не рисует, а считает нужный RECT. */
-static int MeasureCellHeight(HDC hdc, const wchar_t* text, int colWidth)
+// Суммарная высота таблицы при заданном кегле
+static int MeasureTableHeight(HDC deviceContext, int columnWidth, int fontSize)
 {
-    RECT rc;
-    int textWidth = colWidth - 2 * CELL_PAD;
-    if (textWidth < 1)
-        textWidth = 1;
+    int row;
+    int totalHeight = 0;
 
-    SetRect(&rc, 0, 0, textWidth, 0);
-    DrawTextW(hdc, text, -1, &rc,
-              DT_CALCRECT | DT_WORDBREAK | DT_LEFT | DT_TOP | DT_NOPREFIX);
-    return (rc.bottom - rc.top) + 2 * CELL_PAD;
+    for (row = 0; row < ROWS; ++row)
+        totalHeight += MeasureRowHeight(deviceContext, row, columnWidth, fontSize);
+    return totalHeight;
 }
 
-/* Высота строки = max по ячейкам строки; суммируем - высота всей таблицы. */
-static void ComputeRowHeights(HDC hdc, int colWidth, int* rowHeights, int* totalHeight)
+// Наибольший кегль, при котором таблица ещё помещается в окно
+static int FitFontSize(HDC deviceContext, int columnWidth)
 {
-    int r, c;
-    *totalHeight = 0;
-    for (r = 0; r < g_rows; ++r) {
-        int maxH = 0;
-        for (c = 0; c < g_cols; ++c) {
-            int h = MeasureCellHeight(hdc, g_cells[r][c], colWidth);
-            if (h > maxH)
-                maxH = h;
-        }
-        rowHeights[r] = maxH;
-        *totalHeight += maxH;
-    }
-}
 
-/*
- * Бинарный поиск высоты шрифта в [MIN_FONT_PX; MAX_FONT_PX]:
- * ищем максимальный размер, при котором высота таблицы ≤ высоты окна.
- * mid — кандидат; влезло - пробуем крупнее (lo), иначе — мельче (hi).
- * MIN/MAX — границы поиска, не фиксированный размер шрифта в рантайме.
- */
-static int FitFontToClient(HWND hwnd)
-{
-    /* Нижняя граница диапазона */
-    int lo = MIN_FONT_PX;
+    // Границы поиска кегля и лучший подходящий размер
+    int minFontSize = 8, maxFontSize = 36, bestFontSize = 8;
 
-    /* Верхняя граница диапазона */
-    int hi = MAX_FONT_PX;
+    while (minFontSize <= maxFontSize) {
 
-    int best = MIN_FONT_PX;
-    int colWidth;
-    HDC hdc;
-    int* rowHeights;
+        // Середина текущего диапазона
+        int middleFontSize = (minFontSize + maxFontSize) / 2;
 
-    if (g_clientW <= 0 || g_clientH <= 0)
-        return MIN_FONT_PX;
-
-    colWidth = g_clientW / g_cols;
-    if (colWidth < 1)
-        colWidth = 1;
-
-    rowHeights = (int*)malloc((size_t)g_rows * sizeof(int));
-    if (!rowHeights)
-        return MIN_FONT_PX;
-
-    hdc = GetDC(hwnd);
-
-    while (lo <= hi) {
-        /* Середина текущего [lo; hi] */
-        int mid = (lo + hi) / 2;
-
-        HFONT font = CreateTableFont(mid);
-        HFONT old = (HFONT)SelectObject(hdc, font);
-        int total = 0;
-
-        ComputeRowHeights(hdc, colWidth, rowHeights, &total);
-
-        SelectObject(hdc, old);
-        DeleteObject(font);
-
-        if (total <= g_clientH) {
-            /* mid подходит — запоминаем */
-            best = mid;
-
-            /* Ищем ещё крупнее */
-            lo = mid + 1;
+        // Таблица влезает — запоминаем кегль и пробуем крупнее
+        if (MeasureTableHeight(deviceContext, columnWidth, middleFontSize) <= clientHeight) {
+            bestFontSize = middleFontSize;
+            minFontSize = middleFontSize + 1;
         } else {
-            /* mid слишком большой — сужаем сверху */
-            hi = mid - 1;
+
+            // Не влезает — ищем меньший кегль
+            maxFontSize = middleFontSize - 1;
         }
     }
-
-    ReleaseDC(hwnd, hdc);
-    free(rowHeights);
-
-    /* Наибольшая высота шрифта, при которой таблица ещё влезала */
-    return best;
+    return bestFontSize;
 }
 
-/* Рисует сетку и текст: равные столбцы, высоты строк уже подобраны. */
-static void DrawTable(HWND hwnd, HDC hdc)
+// Рамка и текст: столбцы одной ширины, высота строки уже посчитана
+static void DrawTable(HDC deviceContext)
 {
-    HFONT font;
-    HFONT oldFont;
-    HPEN pen;
-    HPEN oldPen;
-    int colWidth;
-    int* rowHeights;
-    int totalHeight;
-    int r, c;
-    int y;
-    int remain;
 
-    (void)hwnd;
+    // Базовая ширина столбца и остаток пикселей от деления ширины окна
+    int baseColumnWidth = clientWidth / COLS;
+    int remainderPixels = clientWidth % COLS;
+    int rowTop = 0;
+    int row;
+    int column;
 
-    if (g_clientW <= 0 || g_clientH <= 0)
+    // Столбец уже одного пикселя — рисовать нечего
+    if (baseColumnWidth < 1)
         return;
 
-    /* Ширина столбца */
-    colWidth = g_clientW / g_cols;
-    if (colWidth < 1)
-        colWidth = 1;
+    for (row = 0; row < ROWS; ++row) {
 
-    /* Остаток от деления ширины - последнему столбцу, чтобы закрыть окно */
-    remain = g_clientW - colWidth * g_cols;
+        // Высота строки и левый край первой ячейки
+        int rowHeight = MeasureRowHeight(deviceContext, row, baseColumnWidth, fontSizePx);
+        int cellLeft = 0;
 
-    rowHeights = (int*)malloc((size_t)g_rows * sizeof(int));
-    if (!rowHeights)
-        return;
+        for (column = 0; column < COLS; ++column) {
 
-    font = CreateTableFont(g_fontPx);
-    oldFont = (HFONT)SelectObject(hdc, font);
+            // Первым столбцам отдаётся по одному пикселю остатка
+            int cellWidth = baseColumnWidth + (column < remainderPixels);
 
-    ComputeRowHeights(hdc, colWidth, rowHeights, &totalHeight);
+            // Текст с отступом от рамки ячейки
+            RECT textRect = {cellLeft + 4, rowTop + 4,
+                             cellLeft + cellWidth - 4, rowTop + rowHeight - 4};
 
-    pen = CreatePen(PS_SOLID, 1, RGB(60, 60, 60));
-    oldPen = (HPEN)SelectObject(hdc, pen);
+            // Шрифт этой ячейки выбирается в контекст устройства
+            HFONT font = CellFont(row, column, fontSizePx);
+            HFONT previousFont = (HFONT)SelectObject(deviceContext, font);
 
-    /* Рамки (Rectangle) и текст (DrawText с DT_WORDBREAK) */
-    y = 0;
-    for (r = 0; r < g_rows; ++r) {
-        int x = 0;
-        for (c = 0; c < g_cols; ++c) {
-            int w = colWidth + (c == g_cols - 1 ? remain : 0);
-            RECT cell = { x, y, x + w, y + rowHeights[r] };
-            RECT textRc = {
-                x + CELL_PAD,
-                y + CELL_PAD,
-                x + w - CELL_PAD,
-                y + rowHeights[r] - CELL_PAD
-            };
+            // Рамка ячейки
+            Rectangle(deviceContext, cellLeft, rowTop,
+                      cellLeft + cellWidth + 1, rowTop + rowHeight + 1);
 
-            Rectangle(hdc, cell.left, cell.top, cell.right, cell.bottom);
-            DrawTextW(hdc, g_cells[r][c], -1, &textRc,
+            // Текст с переносом по словам
+            DrawTextW(deviceContext, cellText[row][column], -1, &textRect,
                       DT_WORDBREAK | DT_LEFT | DT_TOP | DT_NOPREFIX);
 
-            x += w;
-        }
-        y += rowHeights[r];
-    }
+            // Вернуть прежний шрифт и удалить созданный
+            SelectObject(deviceContext, previousFont);
+            DeleteObject(font);
 
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
-    SelectObject(hdc, oldFont);
-    DeleteObject(font);
-    free(rowHeights);
+            // Следующий столбец
+            cellLeft += cellWidth;
+        }
+
+        // Следующая строка
+        rowTop += rowHeight;
+    }
 }
 
-/* Диспетчер сообщений окна. */
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+// Оконная процедура: перерисовка таблицы и закрытие окна
+static LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    switch (msg) {
-    case WM_SIZE:
-        /* Новые размеры клиента - пересчёт шрифта - запрос перерисовки */
-        g_clientW = LOWORD(lParam);
-        g_clientH = HIWORD(lParam);
+    (void)wParam;
+    (void)lParam;
 
-        /* Подбирает максимальную высоту шрифта */
-        g_fontPx = FitFontToClient(hwnd);
+    switch (message) {
 
-        /* Ставит в очередь WM_PAINT */
-        InvalidateRect(hwnd, NULL, TRUE);
-
-        return 0;
-
+    // Размер окна изменился — класс с CS_HREDRAW | CS_VREDRAW уже запросил перерисовку
     case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        DrawTable(hwnd, hdc);
-        EndPaint(hwnd, &ps);
+        PAINTSTRUCT paintStruct;
+        RECT clientRect;
+
+        // Контекст на время рисования, при необходимости стирается фон
+        HDC deviceContext = BeginPaint(window, &paintStruct);
+
+        // Актуальный размер клиента: от него зависят столбцы и кегль
+        GetClientRect(window, &clientRect);
+        clientWidth = clientRect.right;
+        clientHeight = clientRect.bottom;
+
+        // Подбираем кегль, только если в окне помещаются все столбцы
+        if (clientWidth >= COLS && clientHeight > 0)
+            fontSizePx = FitFontSize(deviceContext, clientWidth / COLS);
+
+        // Сетка и текст
+        DrawTable(deviceContext);
+
+        // Закончить рисование и снять область обновления
+        EndPaint(window, &paintStruct);
         return 0;
     }
 
+    // Закрытие окна завершает цикл сообщений
     case WM_DESTROY:
-        /* Выходим из цикла GetMessage */
         PostQuitMessage(0);
         return 0;
     }
 
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    // Остальные сообщения обрабатывает система
+    return DefWindowProcW(window, message, wParam, lParam);
 }
 
-/* Точка входа GUI: ввод размеров - окно - цикл сообщений. */
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                    PWSTR pCmdLine, int nCmdShow)
+// Точка входа: регистрация класса, создание окна, цикл сообщений
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prevInstance, PWSTR commandLine, int showCommand)
 {
-    WNDCLASSEXW wc = { 0 };
-    HWND hwnd;
-    MSG msg;
+    WNDCLASSW windowClass = {0};
+    HWND window;
+    MSG message;
 
-    (void)hPrevInstance;
-    (void)pCmdLine;
+    (void)prevInstance;
+    (void)commandLine;
 
-    if (!ReadDimensions())
+    // Полная перерисовка при изменении ширины или высоты окна
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = WndProc;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    windowClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = L"Lab2Table";
+
+    // Без зарегистрированного класса окно создать нельзя
+    if (!RegisterClassW(&windowClass))
         return 1;
 
-    InitCells();
+    // Окно с заголовком и рамкой
+    window = CreateWindowW(L"Lab2Table", L"Таблица", WS_OVERLAPPEDWINDOW,
+                            CW_USEDEFAULT, CW_USEDEFAULT, 900, 640,
+                            NULL, NULL, instance, NULL);
 
-    wc.cbSize = sizeof(wc);
-
-    /* Полный invalidate при ресайзе */
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = WINDOW_CLASS_NAME;
-
-    if (!RegisterClassExW(&wc))
+    if (!window)
         return 1;
 
-    hwnd = CreateWindowExW(
-        0,
-        WINDOW_CLASS_NAME,
-        WINDOW_TITLE,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        900, 600,
-        NULL, NULL, hInstance, NULL);
-
-    if (!hwnd)
-        return 1;
-
-    ShowWindow(hwnd, nCmdShow);
-
-    /* GetMessage - Dispatch - WndProc */
-    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        DispatchMessageW(&msg);
-    }
-
-    return (int)msg.wParam;
+    // Показать окно и разбирать очередь, пока не придёт WM_QUIT
+    ShowWindow(window, showCommand);
+    while (GetMessageW(&message, NULL, 0, 0) > 0)
+        DispatchMessageW(&message);
+    return (int)message.wParam;
 }
