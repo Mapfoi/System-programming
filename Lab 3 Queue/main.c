@@ -15,6 +15,9 @@
 #define TILES_Y ((HEIGHT + TILE - 1) / TILE)
 #define MAX_TILES (TILES_X * TILES_Y)
 
+// Сколько раз прогонять каждый режим и брать минимум времени
+#define REPS 3
+
 // Задание очереди: тайл кадра; SLIST_ENTRY выровнен для Interlocked SList
 typedef struct DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) {
     SLIST_ENTRY link;
@@ -181,6 +184,21 @@ static double RunParallel(int nThreads)
     return dt;
 }
 
+/* === FIX 2: несколько прогонов, берём минимум ===
+ * Один замер — это шум (планировщик, турбо-буст, другие процессы).
+ * Для CPU-задач минимум из N прогонов — лучшая оценка «чистого» времени. */
+static double MeasureParallel(int nThreads, int reps)
+{
+    double best = 1e9, t;
+    int r;
+    for (r = 0; r < reps; ++r) {
+        t = RunParallel(nThreads);
+        if (t < best)
+            best = t;
+    }
+    return best;
+}
+
 int main(int argc, char **argv)
 {
     SYSTEM_INFO si;
@@ -190,34 +208,45 @@ int main(int argc, char **argv)
     g_sem = CreateSemaphoreW(NULL, 0, MAX_TILES + MAX_THREADS, NULL);
     g_allDone = CreateEventW(NULL, TRUE, FALSE, NULL);
 
-    // Эталон: тот же FillTile в одном потоке — сверка пиксель-в-пиксель
-    tSeq = Now();
-    FillTile(g_reference, 0, 0, WIDTH, HEIGHT);
-    tSeq = Now() - tSeq;
+    /* === FIX 1 v2: прогрев + REPS прогонов эталона, берём минимум ===
+    * Первый замер ловит холодный CPU на базовой частоте (~1.2 ГГц),
+    * а параллель идёт на турбо (~3 ГГц). Гоним эталон REPS раз —
+    * к REPS-му прогону CPU уже на турбо, и мы меряем честное время. */
+    FillTile(g_reference, 0, 0, WIDTH, HEIGHT);       // прогрев кэша
+
+    {
+        int r;
+        double best = 1e9;
+        for (r = 0; r < REPS; ++r) {
+            double t0 = Now();
+            FillTile(g_reference, 0, 0, WIDTH, HEIGHT);
+            double dt = Now() - t0;
+            if (dt < best) best = dt;
+        }
+        tSeq = best;
+    }
     printf("sequential  1 thread  %.3f s  (reference)\n", tSeq);
 
     if (argc > 1) {
         counts[0] = atoi(argv[1]);
         nCounts = 1;
     } else {
+        /* === FIX 3: 8 потоков оставлены, но добавлен комментарий ===
+         * На i3-1005G1 (2C/4T) больше 4 потоков смысла нет — упрёмся
+         * в физику. Но строку оставляем для наглядной демонстрации
+         * плато на графике speedup(threads). */
         counts[0] = 1;
         counts[1] = 2;
         counts[2] = 4;
-        counts[3] = (int)si.dwNumberOfProcessors;
+        counts[3] = 8;
         nCounts = 4;
-        if (counts[3] < 8)
-            counts[3] = 8;
-        if (counts[3] > MAX_THREADS)
-            counts[3] = MAX_THREADS;
-        if (counts[3] <= 4)
-            nCounts = 3;
     }
 
     // Параллельный рендер: очередь + N рабочих; speedup относительно 1 потока
     printf("\nthreads    time     speedup\n");
     for (i = 0; i < nCounts; ++i) {
         n = counts[i];
-        tPar[i] = RunParallel(n);
+        tPar[i] = MeasureParallel(n, REPS);
         match = memcmp(g_pixels, g_reference, sizeof(g_pixels)) == 0;
         printf("%7d  %6.3f s  %6.2fx  %s\n", n, tPar[i], tSeq / tPar[i],
                match ? "pixel-match OK" : "MISMATCH");
@@ -230,7 +259,8 @@ int main(int argc, char **argv)
             putchar('#');
         printf("  %.2fx\n", tSeq / tPar[i]);
     }
-    printf("\nBMP: mandelbrot.bmp  (%dx%d, %d tiles)\n", WIDTH, HEIGHT, MAX_TILES);
+    printf("\nCPU: %u logical processors\n", si.dwNumberOfProcessors);
+    printf("BMP: mandelbrot.bmp  (%dx%d, %d tiles)\n", WIDTH, HEIGHT, MAX_TILES);
     CloseHandle(g_sem);
     CloseHandle(g_allDone);
     system("pause");
