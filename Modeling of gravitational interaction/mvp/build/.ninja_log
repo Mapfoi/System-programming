@@ -1,0 +1,6 @@
+# ninja log v7
+22	588	8146422614574448	CMakeFiles/gravity_physics.dir/physics_dll.c.obj	ce8575b48be0763
+27	597	8146422614624434	CMakeFiles/gravity_sim.dir/main_win.c.obj	4762331c4d6f1a8d
+590	677	8146422621033890	gravity_physics.dll	d34684a219eb5d58
+590	677	8146422621033890	libgravity_physics.dll.a	d34684a219eb5d58
+677	775	8146422621113890	gravity_sim.exe	ee14408b2acaaf0
