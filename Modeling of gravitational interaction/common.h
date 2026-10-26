@@ -1,6 +1,30 @@
 #ifndef GRAVITY_COMMON_H
 #define GRAVITY_COMMON_H
 
+/*
+ * common.h — общий контракт между gravity_sim.exe и gravity_physics.dll
+ *
+ * Порядок чтения: common.h → storage_sys.c → physics_dll.c → main_win.c
+ *
+ * --- Как связаны процессы ---
+ * exe НЕ линкуется с DLL на этапе сборки: в рантайме LoadLibraryW("gravity_physics.dll"),
+ * затем GetProcAddress("PhysInit") и т.д. Указатели складываются в PhysicsApi (main_win.c).
+ *
+ * --- Один кадр симуляции (главный цикл в WinMain) ---
+ * 1. PeekMessageW — обработать клавиши/мышь (WndProc может вызвать PhysAddBody, ApplyPreset).
+ * 2. PhysStep(dt, subSteps) — в DLL под CRITICAL_SECTION: несколько подшагов Verlet.
+ * 3. PhysSnapshotRead — memcpy тел из DLL в g_renderBodies (отдельный буфер exe).
+ * 4. InvalidateRect + WM_PAINT → RenderScene в offscreen DC → BitBlt на экран.
+ *
+ * --- Почему два буфера тел ---
+ * Физика пишет в массив внутри DLL (потоки + lock). Рендер читает копию без удержания lock
+ * на время GDI — иначе UI зависал бы на весь PhysStep.
+ *
+ * --- Body vs BodyMeta ---
+ * Body — всё, что нужно интегратору (r, v, a, mass). BodyMeta — UI/игровая логика: alive,
+ * pinned, кольцевой буфер trail[] для Polyline (индекс trailHead — куда писать следующую точку).
+ */
+
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602 // Windows 8+ (для SYNCHRONIZATION_BARRIER и системных примитивов)
 #endif
@@ -12,6 +36,7 @@
 extern "C" {
 #endif
 
+/* --- Лимиты и константы файла снимка --- */
 // Максимальное количество тел и длина истории орбитальных треков
 #define MAX_BODIES      4096
 #define TRAIL_LENGTH    64
@@ -46,6 +71,7 @@ extern "C" {
 #define SIM_SOLAR_DRAW_AU      100.0
 #define SIM_CLUSTER_SOFTENING  4.5     // плотные демо-сцены (галактика, облако)
 
+/* --- Пресеты и системы единиц (влияют на G, dt, подписи HUD) --- */
 typedef enum {
     SIM_UNITS_ASTRO   = 0, // AU, M☉, сутки (Солнечная система, облако)
     SIM_UNITS_CHOREO  = 1, // безразмерные единицы (восьмёрка)
@@ -60,6 +86,7 @@ typedef enum {
     PRESET_RANDOM_CLOUD  = 4  // Случайное гравитационное облако
 } SimPreset;
 
+/* --- Состояние одного тела и сцены --- */
 // Точка орбитального трека в мировых координатах
 typedef struct {
     float x;
@@ -68,9 +95,9 @@ typedef struct {
 
 // Выровненная структура тела (64 байта — 1 кэш-линия CPU для исключения false sharing)
 typedef struct DECLSPEC_ALIGN(64) {
-    double x, y;         // Мировые координаты (16 байт)
-    double vx, vy;       // Компоненты скорости (16 байт)
-    double ax, ay;       // Текущее ускорение (16 байт)
+    double x, y;         // Положение в мировых единицах (AU для СС, безразм. для восьмёрки)
+    double vx, vy;       // Скорость; при Verlet на шаге v обновляется из a_old и a_new
+    double ax, ay;       // Ускорение на текущем шаге; после фазы 2 равно newAx/newAy
     double mass;         // Масса тела (8 байт)
     float  radius;       // Визуальный радиус в мировых единицах (4 байта)
     DWORD  color;        // Цвет GDI COLORREF (4 байта)
@@ -141,6 +168,7 @@ typedef struct DECLSPEC_ALIGN(64) {
     ULONGLONG stepCounter;
 } SceneFileHeader;
 
+/* --- Динамический импорт gravity_physics.dll (main_win.c → LoadPhysicsDll) --- */
 // Типы экспортируемых функций из gravity_physics.dll
 typedef BOOL (__cdecl *PFN_PhysInit)(const SimConfig *cfg);
 typedef void (__cdecl *PFN_PhysShutdown)(void);
@@ -172,6 +200,7 @@ typedef struct {
     PFN_PhysLoadBodies   LoadBodies;
 } PhysicsApi;
 
+/* --- storage_sys.c: конфигурация и персистентность --- */
 // Функции модуля storage_sys.c (Реестр Windows + Проецирование файлов в память)
 void ConfigSetDefaults(SimConfig *cfg);
 void ConfigApplyUnitSystem(SimConfig *cfg, int unitSystem);

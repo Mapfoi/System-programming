@@ -1,3 +1,7 @@
+/*
+ * MVP physics_dll.c — однопоточный Verlet, VirtualAlloc, одна демо-сцена.
+ * PhysStep: lock → VerletSubstep → unlock. PhysSnapshotRead копирует массив в exe.
+ */
 #include "common.h"
 #include <math.h>
 #include <stdlib.h>
@@ -91,6 +95,7 @@ static void ComputeAccelerations(void)
     }
 }
 
+/* Один подшаг Verlet в одном потоке: сдвиг всех r → пересчёт всех a → обновление всех v */
 static void VerletSubstep(double dt)
 {
     int n = g_eng.bodyCount;
@@ -116,6 +121,7 @@ static void VerletSubstep(double dt)
     }
 }
 
+/* Ядро + звёзды на кеплеровских скоростях вокруг (0,0) */
 static void BuildDefaultScene(void)
 {
     g_eng.bodyCount = 0;

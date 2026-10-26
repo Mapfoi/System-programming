@@ -1,11 +1,30 @@
+/*
+ * storage_sys.c — настройки и сохранение состояния (без GUI)
+ *
+ * A) ConfigSetDefaults / ConfigApplyPresetPhysics — что передать в PhysInit и PhysSetParams.
+ *    ConfigSolarPhysicsSubSteps — сколько раз вызвать PhysStep с малым subDt за один кадр (СС).
+ *
+ * B) RegistryLoadConfig: всегда сначала ConfigSetDefaults, потом перезапись полей из реестра.
+ *    RegistrySaveConfig: при выходе и по F5 (вместе со снимком сцены).
+ *
+ * C) SceneSaveMapped: CreateFileW → CreateFileMappingW(PAGE_READWRITE) → MapViewOfFile(FILE_MAP_WRITE)
+ *    → memcpy заголовка и массивов → FlushViewOfFile → UnmapViewOfFile → CloseHandle×2.
+ *    SceneLoadMapped: OPEN_EXISTING, PAGE_READONLY mapping, проверка magic/version/size, memcpy в буфер exe.
+ *
+ * Читать после common.h.
+ */
+
 #include "common.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+/* ========== A. Конфигурация симуляции ========== */
+
 // Путь в реестре текущего пользователя (слайд 9: HKEY_CURRENT_USER, Advapi32.dll)
 static const wchar_t kRegSubKey[] = L"Software\\GravitySim";
 
+// Стартовые значения, если реестр пуст или ключ не создан
 void ConfigSetDefaults(SimConfig *cfg)
 {
     SYSTEM_INFO si;
@@ -59,11 +78,15 @@ void ConfigApplyUnitSystem(SimConfig *cfg, int unitSystem)
     }
 }
 
+/*
+ * Подстраивает «быстроту» галактик/восьмёрки без изменения G: dt_eff = cfg.dt * timeScale * gain.
+ * gain < 1 замедляет хаотичные сцены; gain > 1 ускоряет восьмёрку. СС gain=1 — см. ConfigSolar*.
+ */
 double ConfigPresetTimeGain(int preset)
 {
     switch (preset) {
     case PRESET_SOLAR_SYSTEM:
-        return 1.0;  // для СС скорость задаётся SIM_SOLAR_FRAME_DAYS, не множителем dt
+        return 1.0;
     case PRESET_FIGURE_EIGHT:
         return 35.0;
     case PRESET_GALAXY_CLASH:
@@ -74,6 +97,12 @@ double ConfigPresetTimeGain(int preset)
     }
 }
 
+/*
+ * Солнечная система: нельзя увеличивать dt интегратора для «ускорения времени» — орбиты развалятся.
+ * Вместо этого за кадр продвигаем advance = SIM_SOLAR_FRAME_DAYS * timeScale суток модели,
+ * разбивая на steps кусков по SIM_SOLAR_PHYSICS_SUBDT (PhysStep вызывается с subDt и steps).
+ * Итого модельное время за кадр ≈ steps * subDt (не больше advance из-за ceil и cap).
+ */
 int ConfigSolarPhysicsSubSteps(double timeScale, double *outSubDt)
 {
     if (outSubDt)
@@ -134,6 +163,8 @@ void ConfigUnitSystemForPreset(SimConfig *cfg, int preset)
     }
 }
 
+/* ========== B. Реестр Windows ========== */
+
 static void RegWriteDword(HKEY hKey, const wchar_t *name, DWORD val)
 {
     RegSetValueExW(hKey, name, 0, REG_DWORD, (const BYTE *)&val, sizeof(val));
@@ -164,6 +195,7 @@ static BOOL RegReadDouble(HKEY hKey, const wchar_t *name, double *outVal)
     return FALSE;
 }
 
+// При старте exe: сначала defaults, затем перекрытие полями из реестра (если ключ есть)
 BOOL RegistryLoadConfig(SimConfig *cfg)
 {
     HKEY hKey = NULL;
@@ -244,6 +276,12 @@ BOOL RegistrySaveConfig(const SimConfig *cfg)
     RegCloseKey(hKey);
     return TRUE;
 }
+
+/* ========== C. Снимок сцены .grav (file mapping) ========== */
+/*
+ * Layout на диске: [SceneFileHeader][Body × N][BodyMeta × N]
+ * Загрузка: MapViewOfFile → memcpy в буфер рендера → PhysLoadBodies в DLL
+ */
 
 // Проецирование файлов в память: двухуровневая схема Windows (слайды 58–61)
 // Файл (CreateFileW) -> Проекция файла (CreateFileMappingW) -> Окно проекции (MapViewOfFile)
@@ -386,6 +424,7 @@ BOOL SceneLoadMapped(const wchar_t *filePath, SimConfig *cfg,
         return FALSE;
     }
 
+    /* Указатели внутри отображения: не копируем весь файл, только нужные байты в буфер exe */
     const BYTE *pBodies = view + sizeof(SceneFileHeader);
     const BYTE *pMeta   = pBodies + (size_t)hdr->bodyCount * sizeof(Body);
 
@@ -394,6 +433,7 @@ BOOL SceneLoadMapped(const wchar_t *filePath, SimConfig *cfg,
         memcpy(outMeta,   pMeta,   (size_t)count * sizeof(BodyMeta));
     }
 
+    /* Восстанавливаем параметры камеры и физики; тела в DLL — через PhysLoadBodies из WndProc F9 */
     cfg->dt        = hdr->dt;
     cfg->gravityG  = hdr->gravityG;
     cfg->softening = hdr->softening;
