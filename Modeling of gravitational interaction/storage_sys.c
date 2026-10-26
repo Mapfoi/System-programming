@@ -120,6 +120,7 @@ int ConfigSolarPhysicsSubSteps(double timeScale, double *outSubDt)
     return steps;
 }
 
+/* Вызывается из ApplyPreset: подставляет согласованные G, ε, dt, subSteps под номер сцены 1..4 */
 void ConfigApplyPresetPhysics(SimConfig *cfg, int preset)
 {
     switch (preset) {
@@ -242,9 +243,10 @@ BOOL RegistryLoadConfig(SimConfig *cfg)
         cfg->camZoom = d;
 
     RegCloseKey(hKey);
-    return TRUE;
+    return TRUE;  /* ключ был — даже если часть полей не прочиталась */
 }
 
+/* Записывает текущий g_cfg; camX/camY в реестр не пишем (только zoom) — см. поля RegWrite* */
 BOOL RegistrySaveConfig(const SimConfig *cfg)
 {
     HKEY hKey = NULL;

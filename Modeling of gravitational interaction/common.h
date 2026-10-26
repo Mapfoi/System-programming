@@ -133,9 +133,13 @@ typedef struct {
     double camZoom;          // Масштаб камеры (XFORM zoom)
 } SimConfig;
 
-// Телеметрия и статистика производительности (для вывода в HUD)
+/*
+ * SimStats заполняется в PhysSnapshotRead из g_eng (DLL).
+ * energyDriftRel = (E-E0)/|E0|, E0 = energyBaseline при последнем ResetPreset.
+ * stepTimeMs сглаживается экспоненой в PhysStep для читаемого HUD.
+ */
 typedef struct {
-    int        activeBodies;      // Текущее число живых тел
+    int        activeBodies;
     int        totalBodies;       // Общее число слотов в массиве
     int        mergersCount;      // Количество слияний за сцену
     int        workerThreads;     // Активное число потоков в пуле
@@ -152,10 +156,12 @@ typedef struct {
     LONG       dllThreadsAttached;// Счетчик потоков, прошедших через DllMain
 } SimStats;
 
-// Заголовок бинарного файла снимка симуляции (.grav) для проецирования в память
-// Выровнен по 64 байтам, чтобы массив Body после заголовка был выровнен для SSE/AVX (DECLSPEC_ALIGN(64))
+/*
+ * Файл .grav на диске: [SceneFileHeader][Body × bodyCount][BodyMeta × bodyCount].
+ * bodyCount в заголовке — сколько пар структур следует; magic/version для отсечения чужих файлов.
+ */
 typedef struct DECLSPEC_ALIGN(64) {
-    DWORD     magic;            // GRAV_FILE_MAGIC ('GRAV')
+    DWORD     magic;
     DWORD     version;          // GRAV_FILE_VERSION
     DWORD     bodyCount;        // Количество сохраненных тел
     DWORD     reserved;
@@ -185,7 +191,12 @@ typedef int  (__cdecl *PFN_PhysLoadBodies)(const Body *inBodies, const BodyMeta 
 
 typedef void (__cdecl *PFN_PhysAddCluster)(double cx, double cy, int count);
 
-// Таблица динамического импорта функций DLL (заполняется через GetProcAddress)
+/*
+ * PhysicsApi — все вызовы в DLL идут через эти указатели (LoadPhysicsDll).
+ * Init/Shutdown — жизненный цикл; ResetPreset — пересборка сцены;
+ * Step — интеграция; SnapshotRead — копия для GDI;
+ * LoadBodies — после F9; SetThreads — пересоздаёт барьер и воркеров.
+ */
 typedef struct {
     HMODULE              hModule;
     PFN_PhysInit         Init;

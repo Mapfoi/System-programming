@@ -1,9 +1,13 @@
-#ifndef GRAVITY_MVP_COMMON_H
-#define GRAVITY_MVP_COMMON_H
+#ifndef GRAVITY_COMMON_H
+#define GRAVITY_COMMON_H
 
 /*
- * MVP: общие типы. Читать в порядке common.h → physics_dll.c → main_win.c
- * Body — состояние для интегратора; SimConfig — dt/G/камера; PhysicsApi — указатели из DLL.
+ * common.h — общий контракт между gravity_sim.exe и gravity_physics.dll.
+ *
+ * Body: (x,y,vx,vy,ax,ay,mass) для Velocity Verlet; radius/color для GDI.
+ * BodyMeta: alive и служебные поля метаданных тела.
+ * SimConfig передаётся в PhysInit; paused и камера использует только main_win.
+ * PhysicsApi — указатели на экспорт DLL после LoadLibraryW + GetProcAddress.
  */
 
 #ifndef _WIN32_WINNT

@@ -72,44 +72,43 @@ static ULONGLONG   g_statusExpireTick = 0;
 
 static double QuerySeconds(void)
 {
-    static LARGE_INTEGER freq = {0};
-    LARGE_INTEGER counter;
+    static LARGE_INTEGER freq = {0}; // частота QPC, один раз на процесс
+    LARGE_INTEGER counter; // текущий счётчик
     if (!freq.QuadPart)
-        QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart / (double)freq.QuadPart;
+        QueryPerformanceFrequency(&freq); // тиков в секунду
+    QueryPerformanceCounter(&counter); // снять время
+    return (double)counter.QuadPart / (double)freq.QuadPart; // секунды с дробной частью
 }
 
 static void SetBannerStatus(const wchar_t *msg)
 {
-    wcsncpy(g_statusText, msg, 255);
-    g_statusText[255] = L'\0';
-    g_statusExpireTick = GetTickCount64() + 6000;
+    wcsncpy(g_statusText, msg, 255); // скопировать текст в статусную строку HUD
+    g_statusText[255] = L'\0'; // гарантированный NUL-терминатор
+    g_statusExpireTick = GetTickCount64() + 6000; // скрыть/сбросить через 6 с
 }
 
 static BOOL IsSolarPhysicsView(void)
 {
-    return g_cfg.preset == PRESET_SOLAR_SYSTEM;
+    return g_cfg.preset == PRESET_SOLAR_SYSTEM; // режим «реальные» AU и орбиты
 }
 
 static double WorldDrawScale(void)
 {
-    return IsSolarPhysicsView() ? SIM_SOLAR_DRAW_AU : 1.0;
+    return IsSolarPhysicsView() ? SIM_SOLAR_DRAW_AU : 1.0; // масштаб мира → пиксели для СС
 }
 
-/* Множитель dt для демо-пресетов 2–4; для СС PhysStep использует ConfigSolarPhysicsSubSteps, не это */
 static double EffectiveTimeScale(void)
 {
-    return g_cfg.timeScale * ConfigPresetTimeGain(g_cfg.preset);
+    return g_cfg.timeScale * ConfigPresetTimeGain(g_cfg.preset); // ускорение времени для не-солнечных пресетов
 }
 
 static double TimeScaleUserMax(void)
 {
     if (g_cfg.preset == PRESET_GALAXY_CLASH || g_cfg.preset == PRESET_RANDOM_CLOUD)
-        return 6.0;
+        return 6.0; // слабый потолок — иначе разлетается
     if (g_cfg.preset == PRESET_SOLAR_SYSTEM)
-        return 48.0;
-    return 128.0;
+        return 48.0; // субшаги компенсируют большой timeScale
+    return 128.0; // демо-сцены 1–2
 }
 
 static int g_solarHudSubSteps = 0;
@@ -228,28 +227,26 @@ static const wchar_t *PriorityName(int prio)
 // Динамическая загрузка DLL во время работы программы (слайды 50–51: LoadLibraryW + GetProcAddress)
 static BOOL LoadPhysicsDll(wchar_t *errBuf, size_t errCap)
 {
-    wchar_t dllPath[MAX_PATH];
-    DWORD len = GetModuleFileNameW(NULL, dllPath, MAX_PATH);
+    wchar_t dllPath[MAX_PATH]; // буфер пути к exe → каталог → dll
+    DWORD len = GetModuleFileNameW(NULL, dllPath, MAX_PATH); // полный путь gravity_sim.exe
     if (len > 0) {
-        wchar_t *slash = wcsrchr(dllPath, L'\\');
-        if (slash) *(slash + 1) = L'\0';
-        wcsncat(dllPath, L"gravity_physics.dll", MAX_PATH - wcslen(dllPath) - 1);
+        wchar_t *slash = wcsrchr(dllPath, L'\\'); // последний обратный слэш
+        if (slash) *(slash + 1) = L'\0'; // обрезать имя exe, оставить каталог
+        wcsncat(dllPath, L"gravity_physics.dll", MAX_PATH - wcslen(dllPath) - 1); // имя DLL рядом
     } else {
-        wcscpy(dllPath, L"gravity_physics.dll");
+        wcscpy(dllPath, L"gravity_physics.dll"); // fallback — только имя файла
     }
 
-    /* Сначала DLL рядом с exe (каталог из GetModuleFileNameW), иначе поиск по PATH */
-    g_phys.hModule = LoadLibraryW(dllPath);
+    g_phys.hModule = LoadLibraryW(dllPath); // загрузка из каталога exe
     if (!g_phys.hModule) {
-        g_phys.hModule = LoadLibraryW(L"gravity_physics.dll");
+        g_phys.hModule = LoadLibraryW(L"gravity_physics.dll"); // повтор через PATH
     }
     if (!g_phys.hModule) {
         _snwprintf(errBuf, errCap, L"Не удалось загрузить gravity_physics.dll (код %lu)", GetLastError());
         return FALSE;
     }
 
-    /* Имена экспорта должны совпадать с DLL_EXPORT __cdecl PhysInit в physics_dll.c */
-    g_phys.Init         = (PFN_PhysInit)(void *)GetProcAddress(g_phys.hModule, "PhysInit");
+    g_phys.Init         = (PFN_PhysInit)(void *)GetProcAddress(g_phys.hModule, "PhysInit"); // указатель на PhysInit
     g_phys.Shutdown     = (PFN_PhysShutdown)(void *)GetProcAddress(g_phys.hModule, "PhysShutdown");
     g_phys.ResetPreset  = (PFN_PhysResetPreset)(void *)GetProcAddress(g_phys.hModule, "PhysResetPreset");
     g_phys.Step         = (PFN_PhysStep)(void *)GetProcAddress(g_phys.hModule, "PhysStep");
@@ -262,13 +259,13 @@ static BOOL LoadPhysicsDll(wchar_t *errBuf, size_t errCap)
 
     if (!g_phys.Init || !g_phys.Shutdown || !g_phys.ResetPreset || !g_phys.Step ||
         !g_phys.AddBody || !g_phys.AddCluster || !g_phys.SetThreads || !g_phys.SetParams ||
-        !g_phys.SnapshotRead || !g_phys.LoadBodies) {
+        !g_phys.SnapshotRead || !g_phys.LoadBodies) { // любой NULL — несовместимая DLL
         _snwprintf(errBuf, errCap, L"Не найдены экспортируемые функции в gravity_physics.dll");
-        FreeLibrary(g_phys.hModule);
+        FreeLibrary(g_phys.hModule); // освободить частично загруженную библиотеку
         g_phys.hModule = NULL;
         return FALSE;
     }
-    return TRUE;
+    return TRUE; // g_phys готов к вызовам
 }
 
 // Создание логических шрифтов (слайд 34: LOGFONT + CreateFontIndirectW)
@@ -384,11 +381,9 @@ static void DrawWorldGrid(HDC hdc, int clientW, int clientH)
     DeleteObject(axisPen);
 }
 
-// Отрисовка сцены в контексте памяти с применением трансформаций XFORM (слайды 38–41)
-// Полный кадр: фон → сетка → орбиты-гид → треки → тела → векторы → HUD (в мировых единицах + XFORM)
 static void RenderScene(HDC hdc, int clientW, int clientH)
 {
-    // 1. Заливка глубокого космического фона в физических координатах
+    /* [1] Фон в пикселях окна (ещё без мировой матрицы) */
     RECT bgRect = { 0, 0, clientW, clientH };
     HBRUSH bgBrush = CreateSolidBrush(RGB(8, 11, 18));
     FillRect(hdc, &bgRect, bgBrush);
@@ -410,6 +405,7 @@ static void RenderScene(HDC hdc, int clientW, int clientH)
     xf.eDy  = (FLOAT)((double)clientH * 0.5 - g_cfg.camY * g_cfg.camZoom);
     SetWorldTransform(hdc, &xf);
 
+    /* [2] Опциональные слои в мировых координатах (уже с XFORM) */
     if (g_cfg.showGrid) {
         DrawWorldGrid(hdc, clientW, clientH);
     }
@@ -418,8 +414,7 @@ static void RenderScene(HDC hdc, int clientW, int clientH)
         DrawSolarOrbitGuides(hdc, kDraw);
     }
 
-    // 3. Отрисовка орбитальных треков в мировых координатах через Polyline
-    // Используем DC_PEN и DC_BRUSH (GetStockObject), чтобы не пересоздавать тысячи объектов GDI каждый кадр
+    /* [3] Следы: Polyline по кольцевому буферу trail; DC_PEN — без CreatePen на каждое тело */
     if (g_cfg.showTrails) {
         POINT pts[TRAIL_LENGTH];
         HPEN dcPen = (HPEN)GetStockObject(DC_PEN);
@@ -446,7 +441,7 @@ static void RenderScene(HDC hdc, int clientW, int clientH)
         SelectObject(hdc, oldPen);
     }
 
-    // 4. Отрисовка гравитационных тел и векторов скорости в мировых координатах
+    /* [4] Тела: Ellipse в координатах world*kDraw; вектор скорости — отрезок длиной |v|*vScale */
     HPEN nullPen   = (HPEN)GetStockObject(NULL_PEN);
     HBRUSH dcBrush = (HBRUSH)GetStockObject(DC_BRUSH);
     HPEN vecPen    = CreatePen(PS_SOLID, 1, RGB(90, 230, 150));
@@ -662,38 +657,37 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         return 1; // Предотвращение мерцания при двойной буферизации
 
     case WM_LBUTTONDOWN: {
-        SetCapture(hWnd);
-        g_slingshotActive = TRUE;
-        g_slingStartX = GET_X_LPARAM(lParam);
+        SetCapture(hWnd); // мышь привязана к окну до отпускания ЛКМ
+        g_slingshotActive = TRUE; // режим рогатки
+        g_slingStartX = GET_X_LPARAM(lParam); // клиентские координаты начала
         g_slingStartY = GET_Y_LPARAM(lParam);
-        g_slingCurX   = g_slingStartX;
+        g_slingCurX   = g_slingStartX; // пока курсор не двигали
         g_slingCurY   = g_slingStartY;
         return 0;
     }
 
     case WM_LBUTTONUP: {
         if (g_slingshotActive) {
-            ReleaseCapture();
+            ReleaseCapture(); // вернуть захват мыши системе
             g_slingshotActive = FALSE;
 
-            RECT rc;
+            RECT rc; // размер клиентской области
             GetClientRect(hWnd, &rc);
-            double wx, wy;
+            double wx, wy; // мировые координаты точки запуска
             ScreenToWorld(g_slingStartX, g_slingStartY, rc.right, rc.bottom, &wx, &wy);
 
-            /* Рогатка: тело появляется в точке нажатия; v ∝ (текущая_мышь - точка_нажатия), масштаб vFac */
-            double vFac = (g_cfg.preset == PRESET_SOLAR_SYSTEM) ? 0.004 : 0.55;
+            double vFac = (g_cfg.preset == PRESET_SOLAR_SYSTEM) ? 0.004 : 0.55; // масштаб скорости от жеста
             if (g_cfg.preset == PRESET_SOLAR_SYSTEM)
-                vFac /= (g_cfg.camZoom > 1.0 ? g_cfg.camZoom : 1.0);
+                vFac /= (g_cfg.camZoom > 1.0 ? g_cfg.camZoom : 1.0); // при зуме СС — слабее импульс
             else
-                vFac /= g_cfg.camZoom;
-            double vx = (double)(g_slingCurX - g_slingStartX) * vFac;
+                vFac /= g_cfg.camZoom; // для демо — делим на zoom
+            double vx = (double)(g_slingCurX - g_slingStartX) * vFac; // вектор «натяжения» → vx
             double vy = (double)(g_slingCurY - g_slingStartY) * vFac;
 
-            DWORD col = RGB(120 + (rand() % 135), 150 + (rand() % 105), 255);
-            g_phys.AddBody(wx, wy, vx, vy, g_spawnMass, 0.0f, col);
-            g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats);
-            InvalidateRect(hWnd, NULL, FALSE);
+            DWORD col = RGB(120 + (rand() % 135), 150 + (rand() % 105), 255); // случайный оттенок
+            g_phys.AddBody(wx, wy, vx, vy, g_spawnMass, 0.0f, col); // новое тело в DLL
+            g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats); // сразу на экран
+            InvalidateRect(hWnd, NULL, FALSE); // перерисовать с рогаткой/телом
         }
         return 0;
     }
@@ -936,8 +930,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     }
 
     case WM_DESTROY:
+        /* Последний шанс записать zoom/preset/потоки; тела на диск — только если пользователь жал F5 */
         RegistrySaveConfig(&g_cfg);
-        PostQuitMessage(0);
+        PostQuitMessage(0);  /* выход из цикла WinMain через WM_QUIT */
         return 0;
     }
 
@@ -1088,7 +1083,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return RunAutomatedSelfTest();
     }
 
-    // 1. Чтение сохраненной конфигурации из реестра Windows (или установка значений по умолчанию)
+    /* Шаг 1: реестр. Если там старые G=120 или ε от галактики — перезаписать астро-параметры СС */
     BOOL fromReg = RegistryLoadConfig(&g_cfg);
     if (fromReg) {
         wcsncpy(g_statusText, L"Настройки восстановлены из реестра HKCU\\Software\\GravitySim", 255);
@@ -1100,14 +1095,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     if (g_cfg.preset == PRESET_SOLAR_SYSTEM)
         g_spawnMass = 1e-5;
-    // 2. Динамический импорт вычислительной DLL (LoadLibraryW + GetProcAddress)
+    /* Шаг 2: без DLL дальше нельзя — PhysInit живёт в другом модуле */
     wchar_t errMsg[256] = {0};
     if (!LoadPhysicsDll(errMsg, 256)) {
         MessageBoxW(NULL, errMsg, L"Ошибка загрузки DLL", MB_ICONERROR | MB_OK);
         return 1;
     }
 
-    // 3. Выделение буфера рендеринга в виртуальной памяти процесса
+    /* Шаг 3: отдельный VirtualAlloc в exe (не путать с блоком внутри physics_dll) */
     SIZE_T renderBufBytes = sizeof(Body) * MAX_BODIES + sizeof(BodyMeta) * MAX_BODIES;
     BYTE *renderMem = (BYTE *)VirtualAlloc(NULL, renderBufBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!renderMem) {
@@ -1118,7 +1113,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_renderBodies = (Body *)renderMem;
     g_renderMeta   = (BodyMeta *)(renderMem + sizeof(Body) * MAX_BODIES);
 
-    // 4. Инициализация физического ядра и генерация начальной астрофизической сцены
+    /* Шаг 4: Init создаёт память в DLL и потоки; ApplyPreset → ResetPreset + SnapshotRead */
     if (!g_phys.Init(&g_cfg)) {
         MessageBoxW(NULL, L"Ошибка инициализации PhysInit в gravity_physics.dll", L"Ошибка", MB_ICONERROR | MB_OK);
         VirtualFree(renderMem, 0, MEM_RELEASE);
@@ -1131,7 +1126,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     InitGdiFonts();
     g_lastFrameTime = QuerySeconds();
 
-    // 5. Регистрация оконного класса (слайды 14–15: WNDCLASSEXW, RegisterClassExW)
+    /* Шаг 5–6: класс окна + CreateWindow; lpfnWndProc = WndProc для ввода */
     WNDCLASSEXW wcex = {0};
     wcex.cbSize        = sizeof(WNDCLASSEXW);
     wcex.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -1175,70 +1170,68 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
-    // 6. Неблокирующий цикл реального времени (PeekMessageW + QueryPerformanceCounter)
-    // Обеспечивает ровно до 60.0 FPS без потери кадров из-за кванта системного таймера (15.6 мс)
+    /*
+     * Шаг 7 — игровой цикл:
+     *   a) вычистить очередь сообщений (иначе окно «зависнет» при тяжёлой физике);
+     *   b) PhysStep если не paused;
+     *   c) отрисовка через UpdateWindow → WM_PAINT;
+     *   d) добить кадр до 16.67 ms (Sleep + SwitchToThread).
+     */
     MSG msg = {0};
     BOOL running = TRUE;
     double frameStart = QuerySeconds();
 
-    while (running) {
-        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
+    while (running) { // главный цикл до WM_QUIT
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { // неблокирующая очередь сообщений
+            if (msg.message == WM_QUIT) { // PostQuitMessage из WM_DESTROY
                 running = FALSE;
                 break;
             }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            TranslateMessage(&msg); // клавиши → символы
+            DispatchMessageW(&msg); // WndProc: ввод, меню, paint по запросу
         }
         if (!running)
             break;
 
-        // Физика: для СС — много малых subDt; для остальных — dt × timeScale × gain пресета
-        if (!g_cfg.paused) {
-            if (g_cfg.preset == PRESET_SOLAR_SYSTEM) {
-                double subDt = SIM_SOLAR_PHYSICS_SUBDT;
-                int subSteps = ConfigSolarPhysicsSubSteps(g_cfg.timeScale, &subDt);
-                g_solarHudSubDt = subDt;
+        if (!g_cfg.paused) { // пауза — только отрисовка и ввод
+            if (g_cfg.preset == PRESET_SOLAR_SYSTEM) { // отдельная ветка стабильности орбит
+                double subDt = SIM_SOLAR_PHYSICS_SUBDT; // базовый малый шаг в «днях» модели
+                int subSteps = ConfigSolarPhysicsSubSteps(g_cfg.timeScale, &subDt); // сколько subDt за кадр
+                g_solarHudSubDt = subDt; // для строки HUD
                 g_solarHudSubSteps = subSteps;
-                g_phys.Step(subDt, subSteps);
+                g_phys.Step(subDt, subSteps); // DLL: N подшагов Verlet
             } else {
-                int subSteps = (g_cfg.subSteps >= 1) ? g_cfg.subSteps : 6;
+                int subSteps = (g_cfg.subSteps >= 1) ? g_cfg.subSteps : 6; // из конфига или дефолт
                 if (g_cfg.timeScale > 2.0 &&
-                    subSteps < (int)(g_cfg.timeScale * 4.0)) {
+                    subSteps < (int)(g_cfg.timeScale * 4.0)) { // больше ускорение → больше субшагов
                     subSteps = (int)(g_cfg.timeScale * 4.0);
-                    if (subSteps > 32) subSteps = 32;
+                    if (subSteps > 32) subSteps = 32; // потолок нагрузки
                 }
-                g_phys.Step(g_cfg.dt * EffectiveTimeScale(), subSteps);
+                g_phys.Step(g_cfg.dt * EffectiveTimeScale(), subSteps); // один «логический» dt на подшаг
             }
         }
 
-        /*
-         * SnapshotRead после Step — UI видит согласованный кадр. InvalidateRect помечает область «грязной»;
-         * UpdateWindow синхронно шлёт WM_PAINT (в простом цикле без отдельного таймера).
-         */
-        g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats);
-        InvalidateRect(hWnd, NULL, FALSE);
-        UpdateWindow(hWnd);
+        g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats); // копия под dataLock
+        InvalidateRect(hWnd, NULL, FALSE); // пометить клиентскую область для перерисовки
+        UpdateWindow(hWnd); // синхронный WM_PAINT → RenderScene
 
-        /* Ограничение 60 FPS: Sleep только если кадр уложился быстрее TARGET_FRAME_SEC */
-        double now = QuerySeconds();
-        double elapsed = now - frameStart;
-        if (elapsed < TARGET_FRAME_SEC) {
-            double remMs = (TARGET_FRAME_SEC - elapsed) * 1000.0;
+        double now = QuerySeconds(); // время после физики и paint
+        double elapsed = now - frameStart; // длительность кадра
+        if (elapsed < TARGET_FRAME_SEC) { // кадр быстрее 60 FPS — подождать
+            double remMs = (TARGET_FRAME_SEC - elapsed) * 1000.0; // остаток в мс
             if (remMs > 2.5) {
-                Sleep((DWORD)(remMs - 1.5));
+                Sleep((DWORD)(remMs - 1.5)); // грубый сон, оставляем запас под таймер
             }
-            // Докрутка оставшихся долей миллисекунды с уступкой кванта времени SwitchToThread (слайд 76)
-            while ((QuerySeconds() - frameStart) < TARGET_FRAME_SEC) {
-                SwitchToThread();
+            while ((QuerySeconds() - frameStart) < TARGET_FRAME_SEC) { // точная доводка без busy-wait
+                SwitchToThread(); // отдать квант другому потоку ОС
             }
         }
 
         double frameEnd = QuerySeconds();
-        double dtFrame = frameEnd - frameStart;
-        frameStart = frameEnd;
-        if (dtFrame > 0.0001 && dtFrame < 1.0) {
-            g_fps = g_fps * 0.88 + (1.0 / dtFrame) * 0.12;
+        double dtFrame = frameEnd - frameStart; // итоговая длительность кадра
+        frameStart = frameEnd; // якорь для следующей итерации
+        if (dtFrame > 0.0001 && dtFrame < 1.0) { // отфильтровать выбросы
+            g_fps = g_fps * 0.88 + (1.0 / dtFrame) * 0.12; // EMA сглаживание FPS в HUD
         }
     }
 

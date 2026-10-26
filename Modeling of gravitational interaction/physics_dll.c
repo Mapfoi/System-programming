@@ -69,43 +69,43 @@ static volatile LONG g_dllThreadsAttached = 0;
 // Генератор псевдослучайных чисел [0..1] для пресетов
 static double RandUnit(unsigned int *seed)
 {
-    *seed = (*seed * 1664525u + 1013904223u);
-    return (double)(*seed & 0x00FFFFFFu) / (double)0x01000000u;
+    *seed = (*seed * 1664525u + 1013904223u); // шаг LCG, обновляет seed на месте
+    return (double)(*seed & 0x00FFFFFFu) / (double)0x01000000u; // 24 бита → дробь [0,1)
 }
 
 static double NowMs(void)
 {
-    LARGE_INTEGER t;
-    if (!g_eng.qpcFreq.QuadPart)
-        QueryPerformanceFrequency(&g_eng.qpcFreq);
-    QueryPerformanceCounter(&t);
-    return (double)t.QuadPart * 1000.0 / (double)g_eng.qpcFreq.QuadPart;
+    LARGE_INTEGER t; // текущий тик счётчика производительности
+    if (!g_eng.qpcFreq.QuadPart) // ленивая инициализация частоты QPC
+        QueryPerformanceFrequency(&g_eng.qpcFreq); // тиков в секунду
+    QueryPerformanceCounter(&t); // снять значение счётчика
+    return (double)t.QuadPart * 1000.0 / (double)g_eng.qpcFreq.QuadPart; // перевод в миллисекунды
 }
 
 static float RadiusFromMass(double mass)
 {
-    float r = (float)(2.0 + pow(mass, 0.28) * 1.15);
-    if (r < 2.0f) r = 2.0f;
-    if (r > 95.0f) r = 95.0f;
-    return r;
+    float r = (float)(2.0 + pow(mass, 0.28) * 1.15); // радиус от массы (демо-масштаб)
+    if (r < 2.0f) r = 2.0f; // не рисовать слишком мелкими
+    if (r > 95.0f) r = 95.0f; // ограничить гигантами
+    return r; // визуальный радиус для GDI
 }
 
 // Округление размера вверх до гранулярности виртуальной памяти (64 КБ, слайд 118)
 static SIZE_T AlignTo64K(SIZE_T size)
 {
-    const SIZE_T gran = 65536;
-    return (size + gran - 1) & ~(gran - 1);
+    const SIZE_T gran = 65536; // 64 КБ — гранула VirtualAlloc
+    return (size + gran - 1) & ~(gran - 1); // округление размера региона вверх
 }
 
 // Кольцевой буфер трека: trailHead — слот следующей записи; trailCount растёт до TRAIL_LENGTH
 static void PushTrailPoint(BodyMeta *m, double x, double y)
 {
-    LONG head = m->trailHead;
-    m->trail[head].x = (float)x;
-    m->trail[head].y = (float)y;
-    m->trailHead = (head + 1) % TRAIL_LENGTH;
-    if (m->trailCount < TRAIL_LENGTH)
-        m->trailCount++;
+    LONG head = m->trailHead; // куда писать в кольцевом буфере
+    m->trail[head].x = (float)x; // координата X следа
+    m->trail[head].y = (float)y; // координата Y следа
+    m->trailHead = (head + 1) % TRAIL_LENGTH; // следующий слот (по кругу)
+    if (m->trailCount < TRAIL_LENGTH) // пока не набрали TRAIL_LENGTH точек
+        m->trailCount++; // увеличить длину валидной истории
 }
 
 /* ========== Интегратор: один подшаг Verlet (фазы 1 и 2) ========== */
@@ -126,42 +126,40 @@ static void PushTrailPoint(BodyMeta *m, double x, double y)
 // Фаза 1: параллельный расчет новых ускорений и потенциальной энергии (Velocity Verlet)
 static void ExecutePhase1_Forces(int workerIdx)
 {
-    const int n = g_eng.bodyCount;
-    const double G = g_eng.gravityG;
-    const double eps2 = g_eng.softening * g_eng.softening;
-    const double dt = g_eng.curDt;
-    const double halfDt2 = 0.5 * dt * dt;
-    Body *bodies = g_eng.bodies;
-    BodyMeta *meta = g_eng.meta;
-    double localU = 0.0;
+    const int n = g_eng.bodyCount; // число слотов тел в массиве
+    const double G = g_eng.gravityG; // гравитационная постоянная сцены
+    const double eps2 = g_eng.softening * g_eng.softening; // ε² для сглаживания расстояния
+    const double dt = g_eng.curDt; // шаг интегратора текущего подшага
+    const double halfDt2 = 0.5 * dt * dt; // 0.5·dt² для члена ускорения в r
+    Body *bodies = g_eng.bodies; // SoA: координаты, скорости, ускорения
+    BodyMeta *meta = g_eng.meta; // флаги alive/pinned и следы
+    double localU = 0.0; // локальный вклад в потенциальную энергию потока
 
-    for (;;) {
-        LONG start = InterlockedExchangeAdd(&g_eng.nextIndexPhase1, CHUNK_SIZE);
-        if (start >= n)
+    for (;;) { // динамическая раздача чанков фазы «сдвиг r»
+        LONG start = InterlockedExchangeAdd(&g_eng.nextIndexPhase1, CHUNK_SIZE); // атомарно взять следующий кусок индексов
+        if (start >= n) // чанки закончились — выходим из цикла раздачи
             break;
-        LONG end = start + CHUNK_SIZE;
-        if (end > n)
+        LONG end = start + CHUNK_SIZE; // правый конец чанка (не включительно)
+        if (end > n) // обрезать последний чанк по n
             end = n;
 
-        for (LONG i = start; i < end; ++i) {
-            if (!meta[i].alive)
+        for (LONG i = start; i < end; ++i) { // обработать все индексы в [start, end)
+            if (!meta[i].alive) // мёртвое тело не двигаем
                 continue;
 
-            // Шаг 1 интегратора Velocity Verlet: r(t + dt) = r(t) + v(t)*dt + 0.5*a(t)*dt^2
-            if (!meta[i].pinned) {
-                bodies[i].x += bodies[i].vx * dt + bodies[i].ax * halfDt2;
-                bodies[i].y += bodies[i].vy * dt + bodies[i].ay * halfDt2;
+            if (!meta[i].pinned) { // закреплённое (если есть) остаётся на месте
+                bodies[i].x += bodies[i].vx * dt + bodies[i].ax * halfDt2; // Verlet: x += v·dt + 0.5·a·dt²
+                bodies[i].y += bodies[i].vy * dt + bodies[i].ay * halfDt2; // то же по Y
             }
         }
     }
 
-    // Ждем, пока все потоки обновят координаты r(t + dt), прежде чем считать новые силы F(t + dt)
-    if (g_eng.numWorkers > 1) {
-        EnterSynchronizationBarrier(&g_eng.barrier, 0);
+    if (g_eng.numWorkers > 1) { // при одном потоке барьер не нужен
+        EnterSynchronizationBarrier(&g_eng.barrier, 0); // все потоки видят обновлённые r перед силами
     }
 
-    for (;;) {
-        LONG start = InterlockedExchangeAdd(&g_eng.nextIndexPhase2, CHUNK_SIZE);
+    for (;;) { // вторая раздача: суммирование ускорений и U
+        LONG start = InterlockedExchangeAdd(&g_eng.nextIndexPhase2, CHUNK_SIZE); // счётчик для фазы сил
         if (start >= n)
             break;
         LONG end = start + CHUNK_SIZE;
@@ -169,82 +167,79 @@ static void ExecutePhase1_Forces(int workerIdx)
             end = n;
 
         for (LONG i = start; i < end; ++i) {
-            if (!meta[i].alive) {
+            if (!meta[i].alive) { // для удалённых тел ускорение ноль
                 g_eng.newAx[i] = 0.0;
                 g_eng.newAy[i] = 0.0;
                 continue;
             }
 
-            double xi = bodies[i].x;
+            double xi = bodies[i].x; // позиция i после первого полушага
             double yi = bodies[i].y;
-            double mi = bodies[i].mass;
-            double axi = 0.0;
-            double ayi = 0.0;
+            double mi = bodies[i].mass; // масса i для пары в U
+            double axi = 0.0; // накапливаем a_x от всех j
+            double ayi = 0.0; // накапливаем a_y от всех j
 
-            for (int j = 0; j < n; ++j) {
-                if (i == j || !meta[j].alive)
+            for (int j = 0; j < n; ++j) { // полный O(n²) по соседям
+                if (i == j || !meta[j].alive) // не тянем себя и мёртвых
                     continue;
-                double dx = bodies[j].x - xi;
+                double dx = bodies[j].x - xi; // вектор от i к j
                 double dy = bodies[j].y - yi;
-                /* a_i += G * m_j * (r_j - r_i) / |r_ij|³  (компоненты dx, dy) */
-                double dist2 = dx * dx + dy * dy + eps2;
-                double invDist = 1.0 / sqrt(dist2);
-                double invDist3 = invDist * invDist * invDist;
-                double s = G * bodies[j].mass * invDist3;
-                axi += dx * s;
-                ayi += dy * s;
+                double dist2 = dx * dx + dy * dy + eps2; // |r|² + ε²
+                double invDist = 1.0 / sqrt(dist2); // 1/|r|
+                double invDist3 = invDist * invDist * invDist; // 1/|r|³
+                double s = G * bodies[j].mass * invDist3; // масштаб силы на единицу dx,dy
+                axi += dx * s; // проекция ускорения на X
+                ayi += dy * s; // проекция ускорения на Y
 
-                /* Потенциальная энергия U = -Σ_{i<j} G m_i m_j / r_ij — считаем один раз на пару */
-                if (j > i) {
-                    localU -= G * mi * bodies[j].mass * invDist;
+                if (j > i) { // каждую пару (i,j) учитываем в U один раз
+                    localU -= G * mi * bodies[j].mass * invDist; // U_ij = -G m_i m_j / r
                 }
             }
 
-            g_eng.newAx[i] = axi;
+            g_eng.newAx[i] = axi; // записать новое ускорение для фазы 2
             g_eng.newAy[i] = ayi;
         }
     }
 
-    g_eng.partialU[workerIdx] = localU;
+    g_eng.partialU[workerIdx] = localU; // сложить partialU на главном после барьера
 }
 
 // Фаза 2: параллельное обновление скоростей v(t + dt) = v(t) + 0.5*(a(t) + a(t+dt))*dt и треков
 static void ExecutePhase2_Integrate(int workerIdx)
 {
-    const int n = g_eng.bodyCount;
-    const double halfDt = 0.5 * g_eng.curDt;
-    const BOOL recTrail = g_eng.recordTrailThisStep;
+    const int n = g_eng.bodyCount; // размер массива тел
+    const double halfDt = 0.5 * g_eng.curDt; // половина шага для v = v + 0.5(a+a')dt
+    const BOOL recTrail = g_eng.recordTrailThisStep; // писать след только на некоторых кадрах
     Body *bodies = g_eng.bodies;
     BodyMeta *meta = g_eng.meta;
-    double localK = 0.0;
+    double localK = 0.0; // локальная кинетическая энергия потока
 
-    // Равномерное разбиение диапазона по индексу потока
-    int totalThreads = g_eng.numWorkers;
+    int totalThreads = g_eng.numWorkers; // число воркеров пула
     if (totalThreads < 1)
-        totalThreads = 1;
-    int perThread = (n + totalThreads - 1) / totalThreads;
-    int start = workerIdx * perThread;
-    int end = start + perThread;
-    if (end > n) end = n;
+        totalThreads = 1; // защита от нуля
+    int perThread = (n + totalThreads - 1) / totalThreads; // ceil(n / threads)
+    int start = workerIdx * perThread; // первый индекс этого воркера
+    int end = start + perThread; // конец диапазона (может быть > n)
+    if (end > n) end = n; // обрезка хвоста
 
-    for (int i = start; i < end; ++i) {
+    for (int i = start; i < end; ++i) { // статическое разбиение без Interlocked
         if (!meta[i].alive)
             continue;
         if (!meta[i].pinned) {
-            bodies[i].vx += (bodies[i].ax + g_eng.newAx[i]) * halfDt;
+            bodies[i].vx += (bodies[i].ax + g_eng.newAx[i]) * halfDt; // Verlet: обновить v
             bodies[i].vy += (bodies[i].ay + g_eng.newAy[i]) * halfDt;
-            bodies[i].ax = g_eng.newAx[i];
+            bodies[i].ax = g_eng.newAx[i]; // a(t+dt) становится a для следующего шага
             bodies[i].ay = g_eng.newAy[i];
         }
-        double v2 = bodies[i].vx * bodies[i].vx + bodies[i].vy * bodies[i].vy;
-        localK += 0.5 * bodies[i].mass * v2;
+        double v2 = bodies[i].vx * bodies[i].vx + bodies[i].vy * bodies[i].vy; // |v|²
+        localK += 0.5 * bodies[i].mass * v2; // K_i = ½ m v²
 
         if (recTrail) {
-            PushTrailPoint(&meta[i], bodies[i].x, bodies[i].y);
+            PushTrailPoint(&meta[i], bodies[i].x, bodies[i].y); // точка следа в кольце
         }
     }
 
-    g_eng.partialK[workerIdx] = localK;
+    g_eng.partialK[workerIdx] = localK; // суммирование K на главном потоке
 }
 
 /*
@@ -253,44 +248,43 @@ static void ExecutePhase2_Integrate(int workerIdx)
  */
 static void ProcessCollisionsSingleThread(void)
 {
-    if (!g_eng.enableCollisions)
+    if (!g_eng.enableCollisions) // столкновения выключены в настройках
         return;
 
-    int n = g_eng.bodyCount;
+    int n = g_eng.bodyCount; // перебор всех пар (i,j), i<j
     Body *b = g_eng.bodies;
     BodyMeta *m = g_eng.meta;
 
     for (int i = 0; i < n; ++i) {
-        if (!m[i].alive)
+        if (!m[i].alive) // пропуск поглощённых
             continue;
         for (int j = i + 1; j < n; ++j) {
             if (!m[j].alive)
                 continue;
 
-            double dx = b[j].x - b[i].x;
+            double dx = b[j].x - b[i].x; // расстояние между центрами
             double dy = b[j].y - b[i].y;
-            double minDist = (double)(b[i].radius + b[j].radius) * 0.65;
-            if (dx * dx + dy * dy <= minDist * minDist) {
-                // Более массивное тело поглощает менее массивное
-                int keep = (b[i].mass >= b[j].mass) ? i : j;
-                int absorb = (keep == i) ? j : i;
+            double minDist = (double)(b[i].radius + b[j].radius) * 0.65; // порог слияния (чуть меньше суммы радиусов)
+            if (dx * dx + dy * dy <= minDist * minDist) { // пересечение «шаров»
+                int keep = (b[i].mass >= b[j].mass) ? i : j; // выживает более тяжёлое
+                int absorb = (keep == i) ? j : i; // индекс поглощаемого
 
-                double m1 = b[keep].mass;
-                double m2 = b[absorb].mass;
-                double totalM = m1 + m2;
+                double m1 = b[keep].mass; // масса оставшегося
+                double m2 = b[absorb].mass; // масса жертвы
+                double totalM = m1 + m2; // суммарная масса после слияния
 
-                b[keep].vx = (b[keep].vx * m1 + b[absorb].vx * m2) / totalM;
-                b[keep].vy = (b[keep].vy * m1 + b[absorb].vy * m2) / totalM;
-                b[keep].x  = (b[keep].x  * m1 + b[absorb].x  * m2) / totalM;
-                b[keep].y  = (b[keep].y  * m1 + b[absorb].y  * m2) / totalM;
-                b[keep].mass = totalM;
-                b[keep].radius = RadiusFromMass(totalM);
+                b[keep].vx = (b[keep].vx * m1 + b[absorb].vx * m2) / totalM; // сохранение импульса по X
+                b[keep].vy = (b[keep].vy * m1 + b[absorb].vy * m2) / totalM; // по Y
+                b[keep].x  = (b[keep].x  * m1 + b[absorb].x  * m2) / totalM; // центр масс X
+                b[keep].y  = (b[keep].y  * m1 + b[absorb].y  * m2) / totalM; // центр масс Y
+                b[keep].mass = totalM; // новая масса
+                b[keep].radius = RadiusFromMass(totalM); // пересчёт визуального радиуса
 
-                m[absorb].alive = 0;
-                g_eng.activeBodies--;
-                g_eng.mergersCount++;
+                m[absorb].alive = 0; // второе тело исчезает из симуляции
+                g_eng.activeBodies--; // счётчик живых для HUD
+                g_eng.mergersCount++; // статистика слияний
 
-                if (absorb == i)
+                if (absorb == i) // если поглотили i, внутренний j-цикл для i бессмысленен
                     break;
             }
         }
@@ -301,27 +295,22 @@ static void ProcessCollisionsSingleThread(void)
 // Функция рабочего потока пула (слайд 70: CreateThread + SYNCHRONIZATION_BARRIER)
 static DWORD WINAPI PhysicsWorkerProc(LPVOID param)
 {
-    int workerIdx = (int)(INT_PTR)param;
+    int workerIdx = (int)(INT_PTR)param; // 1..N-1; поток 0 — координатор в PhysStep
 
-    for (;;) {
-        // Ожидание начала нового шага от координатора (барьер #1)
-        EnterSynchronizationBarrier(&g_eng.barrier, 0);
-        if (InterlockedCompareExchange(&g_eng.stopWorkers, 0, 0) != 0)
-            break;
+    for (;;) { // бесконечный цикл воркера до stopWorkers
+        EnterSynchronizationBarrier(&g_eng.barrier, 0); // синхронный старт подшага с координатором
+        if (InterlockedCompareExchange(&g_eng.stopWorkers, 0, 0) != 0) // чтение флага остановки без изменения
+            break; // выход из потока при Shutdown
 
-        // Фаза 1: сдвиг координат + барьер внутри + расчет ускорений
-        ExecutePhase1_Forces(workerIdx);
+        ExecutePhase1_Forces(workerIdx); // Verlet: r, затем a' и partialU
 
-        // Ожидание окончания расчета ускорений всеми потоками (барьер #3)
-        EnterSynchronizationBarrier(&g_eng.barrier, 0);
+        EnterSynchronizationBarrier(&g_eng.barrier, 0); // все закончили фазу 1 до фазы 2
 
-        // Фаза 2: обновление скоростей и подсчет кинетической энергии
-        ExecutePhase2_Integrate(workerIdx);
+        ExecutePhase2_Integrate(workerIdx); // v, a←a', partialK, следы
 
-        // Сигнал координатору о завершении шага (барьер #4)
-        EnterSynchronizationBarrier(&g_eng.barrier, 0);
+        EnterSynchronizationBarrier(&g_eng.barrier, 0); // координатор может суммировать энергии и столкновения
     }
-    return 0;
+    return 0; // код завершения потока
 }
 
 static void TerminateWorkerHandles(int fromIdx, int toIdx)
@@ -399,7 +388,10 @@ static void StopWorkerPool(void)
     g_eng.numWorkers = 0;
 }
 
-// Начальный расчет ускорений при генерации новой сцены
+/*
+ * После сборки пресета: заполняем ax/ay и energyBaseline для HUD (дрейф E).
+ * Логика сил идентична фазе 1, но без сдвига r (только один проход i,j).
+ */
 static void ComputeInitialAccelerations(void)
 {
     int n = g_eng.bodyCount;
@@ -432,31 +424,35 @@ static void ComputeInitialAccelerations(void)
     g_eng.potentialEnergy = totalU;
 }
 
-// Вспомогательная вставка тела во внутренний массив
+/*
+ * Добавление тела в конец массива (индекс = bodyCount до инкремента).
+ * ax/ay обнуляются — вызывающий код должен вызвать ComputeInitialAccelerations или следующий PhysStep.
+ * PhysAddBody (экспорт) оборачивает это в dataLock.
+ */
 static int InternalAddBody(double x, double y, double vx, double vy,
                            double mass, float radius, DWORD color)
 {
-    if (g_eng.bodyCount >= MAX_BODIES)
+    if (g_eng.bodyCount >= MAX_BODIES) // массив заполнен
         return -1;
-    int idx = g_eng.bodyCount++;
-    Body *b = &g_eng.bodies[idx];
-    BodyMeta *m = &g_eng.meta[idx];
+    int idx = g_eng.bodyCount++; // новый индекс и увеличение счётчика
+    Body *b = &g_eng.bodies[idx]; // указатель на слот Body
+    BodyMeta *m = &g_eng.meta[idx]; // метаданные того же индекса
 
-    memset(b, 0, sizeof(*b));
-    memset(m, 0, sizeof(*m));
+    memset(b, 0, sizeof(*b)); // обнулить физику (ax/ay тоже)
+    memset(m, 0, sizeof(*m)); // сброс trail и флагов
 
-    b->x = x;
+    b->x = x; // начальная позиция
     b->y = y;
-    b->vx = vx;
+    b->vx = vx; // начальная скорость
     b->vy = vy;
-    b->mass = mass;
-    b->radius = (radius > 0.0f) ? radius : RadiusFromMass(mass);
-    b->color = color;
+    b->mass = mass; // масса в единицах сцены
+    b->radius = (radius > 0.0f) ? radius : RadiusFromMass(mass); // явный радиус или из mass
+    b->color = color; // COLORREF для GDI
 
-    m->alive = 1;
-    PushTrailPoint(m, x, y);
-    g_eng.activeBodies++;
-    return idx;
+    m->alive = 1; // тело участвует в интеграторе
+    PushTrailPoint(m, x, y); // первая точка следа
+    g_eng.activeBodies++; // для статистики
+    return idx; // индекс добавленного тела
 }
 
 // Начальные условия: планета на окружности r под углом angle; v = sqrt(G*M/r) по касательной
@@ -771,21 +767,20 @@ DLL_EXPORT void __cdecl PhysResetPreset(int preset, int customCount)
 // PhysStep: subSteps раз повторить барьер → фаза1 → барьер → фаза2; dt делится на subSteps
 DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
 {
-    if (subSteps < 1) subSteps = 1;
-    if (subSteps > SIM_SOLAR_MAX_SUBSTEPS) subSteps = SIM_SOLAR_MAX_SUBSTEPS;
+    if (subSteps < 1) subSteps = 1; // минимум один подшаг
+    if (subSteps > SIM_SOLAR_MAX_SUBSTEPS) subSteps = SIM_SOLAR_MAX_SUBSTEPS; // потолок для СС
 
-    EnterCriticalSection(&g_eng.dataLock);
+    EnterCriticalSection(&g_eng.dataLock); // эксклюзивный доступ к g_eng
 
-    double tStart = NowMs();
-    double subDt = dt / (double)subSteps;
-    g_eng.curDt = subDt;
+    double tStart = NowMs(); // старт таймера шага
+    double subDt = dt / (double)subSteps; // dt одного подшага Verlet
+    g_eng.curDt = subDt; // глобально для воркеров
 
-    for (int s = 0; s < subSteps; ++s) {
-        g_eng.stepCounter++;
-        /* Точки трека пишем не каждый подшаг — только на чётных stepCounter, последний subStep кадра */
-        g_eng.recordTrailThisStep = (s == subSteps - 1) && ((g_eng.stepCounter % 2) == 0);
-        g_eng.nextIndexPhase1 = 0;
-        g_eng.nextIndexPhase2 = 0;
+    for (int s = 0; s < subSteps; ++s) { // цикл подшагов за один кадр
+        g_eng.stepCounter++; // счётчик интегратора +1
+        g_eng.recordTrailThisStep = (s == subSteps - 1) && ((g_eng.stepCounter % 2) == 0); // след на последнем sub и чётном шаге
+        g_eng.nextIndexPhase1 = 0; // сброс атомарной раздачи r
+        g_eng.nextIndexPhase2 = 0; // сброс раздачи сил
 
         /*
          * Схема барьеров на один подшаг (numWorkers = N):
@@ -796,47 +791,44 @@ DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
          * Воркеры крутятся в PhysicsWorkerProc в бесконечном цикле с теми же барьерами.
          */
         if (g_eng.numWorkers > 1)
-            EnterSynchronizationBarrier(&g_eng.barrier, 0);
+            EnterSynchronizationBarrier(&g_eng.barrier, 0); // барьер #1: старт подшага
 
-        ExecutePhase1_Forces(0);
-
-        if (g_eng.numWorkers > 1)
-            EnterSynchronizationBarrier(&g_eng.barrier, 0);
-
-        ExecutePhase2_Integrate(0);
+        ExecutePhase1_Forces(0); // координатор — workerIdx 0
 
         if (g_eng.numWorkers > 1)
-            EnterSynchronizationBarrier(&g_eng.barrier, 0);
+            EnterSynchronizationBarrier(&g_eng.barrier, 0); // барьер #3: после фазы 1
 
-        // Неупругие столкновения (выполняются координатором между шагами)
-        if (g_eng.enableCollisions) {
+        ExecutePhase2_Integrate(0); // координатор — фаза 2
+
+        if (g_eng.numWorkers > 1)
+            EnterSynchronizationBarrier(&g_eng.barrier, 0); // барьер #4: конец подшага
+
+        if (g_eng.enableCollisions) { // слияния только на главном потоке
             ProcessCollisionsSingleThread();
         }
     }
 
-    // Суммирование полной механической энергии по всем рабочим потокам
-    double sumK = 0.0, sumU = 0.0;
+    double sumK = 0.0, sumU = 0.0; // сумма partialK/U по воркерам
     for (int w = 0; w < g_eng.numWorkers; ++w) {
         sumK += g_eng.partialK[w];
         sumU += g_eng.partialU[w];
     }
-    g_eng.kineticEnergy = sumK;
-    g_eng.potentialEnergy = sumU;
+    g_eng.kineticEnergy = sumK; // обновить K для SnapshotRead
+    g_eng.potentialEnergy = sumU; // обновить U
 
-    double elapsed = NowMs() - tStart;
-    // Экспоненциальное сглаживание времени шага для стабильного отображения в HUD
+    double elapsed = NowMs() - tStart; // длительность PhysStep в мс
     if (g_eng.lastStepMs <= 0.0001)
         g_eng.lastStepMs = elapsed;
     else
-        g_eng.lastStepMs = g_eng.lastStepMs * 0.85 + elapsed * 0.15;
+        g_eng.lastStepMs = g_eng.lastStepMs * 0.85 + elapsed * 0.15; // сглаживание для HUD
 
     if (g_eng.numWorkers == 1) {
         g_eng.singleThreadBaselineMs = g_eng.lastStepMs;
     } else if (g_eng.singleThreadBaselineMs <= 0.0001) {
-        g_eng.singleThreadBaselineMs = elapsed * (double)g_eng.numWorkers * 0.72;
+        g_eng.singleThreadBaselineMs = elapsed * (double)g_eng.numWorkers * 0.72; // оценка «как 1 поток»
     }
 
-    g_eng.simTime += dt;
+    g_eng.simTime += dt; // модельное время
 
     LeaveCriticalSection(&g_eng.dataLock);
 }
@@ -845,16 +837,16 @@ DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
 DLL_EXPORT int __cdecl PhysSnapshotRead(Body *outBodies, BodyMeta *outMeta,
                                         int maxCount, SimStats *outStats)
 {
-    EnterCriticalSection(&g_eng.dataLock);
+    EnterCriticalSection(&g_eng.dataLock); // согласованная копия для UI-потока
 
-    int count = g_eng.bodyCount;
+    int count = g_eng.bodyCount; // сколько слотов реально занято
     if (count > maxCount)
-        count = maxCount;
+        count = maxCount; // не переполнить буфер рендера exe
 
     if (outBodies && count > 0)
-        memcpy(outBodies, g_eng.bodies, (size_t)count * sizeof(Body));
+        memcpy(outBodies, g_eng.bodies, (size_t)count * sizeof(Body)); // снимок массива Body
     if (outMeta && count > 0)
-        memcpy(outMeta, g_eng.meta, (size_t)count * sizeof(BodyMeta));
+        memcpy(outMeta, g_eng.meta, (size_t)count * sizeof(BodyMeta)); // снимок метаданных
 
     if (outStats) {
         outStats->activeBodies       = g_eng.activeBodies;
@@ -920,16 +912,16 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
     switch (fdwReason) {
     case DLL_PROCESS_ATTACH:
-        InterlockedIncrement(&g_dllThreadsAttached);
+        InterlockedIncrement(&g_dllThreadsAttached); // процесс загрузил DLL
         break;
     case DLL_THREAD_ATTACH:
-        InterlockedIncrement(&g_dllThreadsAttached);
+        InterlockedIncrement(&g_dllThreadsAttached); // новый поток в процессе с DLL
         break;
     case DLL_THREAD_DETACH:
-        InterlockedDecrement(&g_dllThreadsAttached);
+        InterlockedDecrement(&g_dllThreadsAttached); // поток завершился
         break;
     case DLL_PROCESS_DETACH:
-        break;
+        break; // выгрузка DLL (PhysShutdown уже должен был остановить воркеров)
     }
-    return TRUE;
+    return TRUE; // успешная обработка DllMain
 }
