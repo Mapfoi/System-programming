@@ -1,6 +1,11 @@
 #ifndef GRAVITY_MVP_COMMON_H
 #define GRAVITY_MVP_COMMON_H
 
+/*
+ * MVP: общие типы. Читать в порядке common.h → physics_dll.c → main_win.c
+ * Body — состояние для интегратора; SimConfig — dt/G/камера; PhysicsApi — указатели из DLL.
+ */
+
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
 #endif

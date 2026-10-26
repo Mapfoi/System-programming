@@ -1,3 +1,24 @@
+/*
+ * main_win.c — клиентское приложение gravity_sim.exe
+ *
+ * WinMain (пошагово):
+ *   1) RegistryLoadConfig — подтянуть preset, zoom, потоки из HKCU\Software\GravitySim
+ *   2) LoadPhysicsDll — LoadLibraryW + GetProcAddress → заполнить g_phys
+ *   3) VirtualAlloc под g_renderBodies/g_renderMeta (копия для отрисовки)
+ *   4) PhysInit(&g_cfg), SetParams, ApplyPreset → PhysResetPreset внутри DLL
+ *   5) CreateWindow; цикл while(running):
+ *        - PeekMessage → DispatchMessage → WndProc (ввод, F5/F9, смена пресета)
+ *        - если !paused: PhysStep (ветка СС через ConfigSolarPhysicsSubSteps)
+ *        - SnapshotRead → InvalidateRect → UpdateWindow → WM_PAINT → BitBlt
+ *        - Sleep/SwitchToThread до 16.67 ms
+ *   6) выход: FreeGdiResources, PhysShutdown, RegistrySaveConfig, VirtualFree
+ *
+ * WndProc не вызывает PhysStep — только меняет g_cfg и иногда дергает DLL (AddBody, LoadBodies).
+ * Отрисовка всегда читает g_render*, не g_eng в DLL.
+ *
+ * Читать последним, после common.h, storage_sys.c, physics_dll.c.
+ */
+
 #include "common.h"
 #include <windowsx.h>
 #include <wingdi.h>
@@ -10,7 +31,8 @@
 #define TARGET_FRAME_SEC (1.0 / TARGET_FPS)
 #define SNAPSHOT_FILE    L"snapshot.grav"
 
-// Глобальное состояние оконного приложения
+/* ========== Глобальное состояние UI ========== */
+// g_phys — таблица функций DLL; g_cfg — настройки; g_render* — копия тел для отрисовки без гонок с DLL
 static PhysicsApi  g_phys = {0};
 static SimConfig   g_cfg  = {0};
 static SimStats    g_stats = {0};
@@ -75,6 +97,7 @@ static double WorldDrawScale(void)
     return IsSolarPhysicsView() ? SIM_SOLAR_DRAW_AU : 1.0;
 }
 
+/* Множитель dt для демо-пресетов 2–4; для СС PhysStep использует ConfigSolarPhysicsSubSteps, не это */
 static double EffectiveTimeScale(void)
 {
     return g_cfg.timeScale * ConfigPresetTimeGain(g_cfg.preset);
@@ -144,13 +167,17 @@ static float BodyDrawRadiusAu(const Body *b)
     return r;
 }
 
-// Преобразование экранных координат в мировые (физические AU для СС) и обратно
+/*
+ * Экран → мир. Обратная к XFORM в RenderScene (без учёта kDraw: мышь задаёт тело в физических AU).
+ * Центр окна (clientW/2, clientH/2) соответствует camX, camY; один пиксель = 1/camZoom мировых единиц.
+ */
 static void ScreenToWorld(int sx, int sy, int clientW, int clientH, double *wx, double *wy)
 {
     *wx = ((double)sx - (double)clientW * 0.5) / g_cfg.camZoom + g_cfg.camX;
     *wy = ((double)sy - (double)clientH * 0.5) / g_cfg.camZoom + g_cfg.camY;
 }
 
+// Смена сцены: физика пресета, камера, ResetPreset в DLL, снимок в буфер рендера
 static void ApplyPreset(int preset)
 {
     g_cfg.preset = preset;
@@ -197,6 +224,7 @@ static const wchar_t *PriorityName(int prio)
     }
 }
 
+/* ========== Загрузка gravity_physics.dll ========== */
 // Динамическая загрузка DLL во время работы программы (слайды 50–51: LoadLibraryW + GetProcAddress)
 static BOOL LoadPhysicsDll(wchar_t *errBuf, size_t errCap)
 {
@@ -210,6 +238,7 @@ static BOOL LoadPhysicsDll(wchar_t *errBuf, size_t errCap)
         wcscpy(dllPath, L"gravity_physics.dll");
     }
 
+    /* Сначала DLL рядом с exe (каталог из GetModuleFileNameW), иначе поиск по PATH */
     g_phys.hModule = LoadLibraryW(dllPath);
     if (!g_phys.hModule) {
         g_phys.hModule = LoadLibraryW(L"gravity_physics.dll");
@@ -219,6 +248,7 @@ static BOOL LoadPhysicsDll(wchar_t *errBuf, size_t errCap)
         return FALSE;
     }
 
+    /* Имена экспорта должны совпадать с DLL_EXPORT __cdecl PhysInit в physics_dll.c */
     g_phys.Init         = (PFN_PhysInit)(void *)GetProcAddress(g_phys.hModule, "PhysInit");
     g_phys.Shutdown     = (PFN_PhysShutdown)(void *)GetProcAddress(g_phys.hModule, "PhysShutdown");
     g_phys.ResetPreset  = (PFN_PhysResetPreset)(void *)GetProcAddress(g_phys.hModule, "PhysResetPreset");
@@ -284,6 +314,8 @@ static void FreeGdiResources(void)
     if (g_fontHudMono)  { DeleteObject(g_fontHudMono);  g_fontHudMono  = NULL; }
     if (g_fontHudSmall) { DeleteObject(g_fontHudSmall); g_fontHudSmall = NULL; }
 }
+
+/* ========== GDI: буфер кадра, сетка, тела, HUD ========== */
 
 static void EnsureBackBuffer(HDC winDC, int w, int h)
 {
@@ -353,6 +385,7 @@ static void DrawWorldGrid(HDC hdc, int clientW, int clientH)
 }
 
 // Отрисовка сцены в контексте памяти с применением трансформаций XFORM (слайды 38–41)
+// Полный кадр: фон → сетка → орбиты-гид → треки → тела → векторы → HUD (в мировых единицах + XFORM)
 static void RenderScene(HDC hdc, int clientW, int clientH)
 {
     // 1. Заливка глубокого космического фона в физических координатах
@@ -361,7 +394,11 @@ static void RenderScene(HDC hdc, int clientW, int clientH)
     FillRect(hdc, &bgRect, bgBrush);
     DeleteObject(bgBrush);
 
-    // 2. Включение расширенного графического режима GM_ADVANCED и установка матрицы XFORM (слайды 38–40)
+    /*
+     * Мировая отрисовка: для СС координаты в AU малы (0.387…30), поэтому kDraw=100 — рисуем в «пикселях мира».
+     * XFORM: screen = zoom * (world * kDraw) + offset, offset ставит (camX,camY) в центр клиентской области.
+     * eM11=eM22= camZoom/kDraw — масштаб; eDx,eDy — сдвиг в пикселях устройства.
+     */
     SetGraphicsMode(hdc, GM_ADVANCED);
     double kDraw = WorldDrawScale();
     XFORM xf;
@@ -396,6 +433,7 @@ static void RenderScene(HDC hdc, int clientW, int clientH)
             DWORD c = g_renderBodies[i].color;
             SetDCPenColor(hdc, RGB(GetRValue(c) / 2, GetGValue(c) / 2, GetBValue(c) / 2));
 
+            /* trailHead указывает на следующую ячейку записи → самая старая точка на (head - count) */
             int cnt = (int)m->trailCount;
             int startIdx = (m->trailHead - cnt + TRAIL_LENGTH) % TRAIL_LENGTH;
             for (int k = 0; k < cnt; ++k) {
@@ -611,6 +649,7 @@ static void CycleThreadPriority(void)
     SetBannerStatus(msg);
 }
 
+/* ========== Окно: сообщения Windows (ввод, paint, destroy) ========== */
 // Оконная процедура обработки сообщений Windows (слайды 16–21)
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -642,7 +681,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             double wx, wy;
             ScreenToWorld(g_slingStartX, g_slingStartY, rc.right, rc.bottom, &wx, &wy);
 
-            // Вектор скорости направлен по оттяжке курсора
+            /* Рогатка: тело появляется в точке нажатия; v ∝ (текущая_мышь - точка_нажатия), масштаб vFac */
             double vFac = (g_cfg.preset == PRESET_SOLAR_SYSTEM) ? 0.004 : 0.55;
             if (g_cfg.preset == PRESET_SOLAR_SYSTEM)
                 vFac /= (g_cfg.camZoom > 1.0 ? g_cfg.camZoom : 1.0);
@@ -683,6 +722,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_slingCurY = my;
         }
         if (g_panningActive) {
+            /* Сдвиг камеры в мировых единицах: пиксели / zoom = расстояние в мире */
             int dx = mx - g_panLastX;
             int dy = my - g_panLastY;
             g_cfg.camX -= (double)dx / g_cfg.camZoom;
@@ -845,6 +885,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         case VK_DOWN:  g_cfg.camY += 35.0 / g_cfg.camZoom; break;
 
         case VK_F5: {
+            /* Снимок: тела из буфера рендера + заголовок в .grav; реестр — только настройки, не тела */
             g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats);
             SceneSaveMapped(SNAPSHOT_FILE, &g_cfg, g_renderBodies, g_renderMeta,
                             g_renderCount, g_stats.stepCounter, msg, 256);
@@ -854,6 +895,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         }
 
         case VK_F9: {
+            /* Загрузка: MapViewOfFile → memcpy в g_render* → PhysLoadBodies пересобирает состояние DLL */
             int loadedCount = 0;
             ULONGLONG loadedStep = 0;
             if (SceneLoadMapped(SNAPSHOT_FILE, &g_cfg, g_renderBodies, g_renderMeta,
@@ -874,6 +916,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     }
 
     case WM_PAINT: {
+        /*
+         * Двойная буферизация: рисуем в g_memDC (совместимый битмап), затем одним BitBlt на winDC.
+         * WM_ERASEBKGND возвращает 1, чтобы Windows не стирала фон до Paint (меньше мерцания).
+         */
         PAINTSTRUCT ps;
         HDC winDC = BeginPaint(hWnd, &ps);
         RECT rc;
@@ -900,6 +946,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 
+/* ========== Автотест (--selftest, без окна) ========== */
 // Режим автоматической самопроверки (--selftest): проверяет DLL, многопоточность,
 // сохранение энергии, File Mapping (.grav) и реестр Windows
 static int RunAutomatedSelfTest(void)
@@ -1033,6 +1080,7 @@ static int RunAutomatedSelfTest(void)
     return 0;
 }
 
+/* ========== Точка входа и игровой цикл 60 FPS ========== */
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     (void)hPrevInstance;
@@ -1145,7 +1193,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (!running)
             break;
 
-        // Шаг физического движка с учетом скорости времени timeScale и числа подшагов subSteps
+        // Физика: для СС — много малых subDt; для остальных — dt × timeScale × gain пресета
         if (!g_cfg.paused) {
             if (g_cfg.preset == PRESET_SOLAR_SYSTEM) {
                 double subDt = SIM_SOLAR_PHYSICS_SUBDT;
@@ -1164,11 +1212,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
 
+        /*
+         * SnapshotRead после Step — UI видит согласованный кадр. InvalidateRect помечает область «грязной»;
+         * UpdateWindow синхронно шлёт WM_PAINT (в простом цикле без отдельного таймера).
+         */
         g_renderCount = g_phys.SnapshotRead(g_renderBodies, g_renderMeta, MAX_BODIES, &g_stats);
         InvalidateRect(hWnd, NULL, FALSE);
         UpdateWindow(hWnd);
 
-        // Высокоточное ограничение частоты кадров ровно до 60 FPS (16.6667 мс на кадр)
+        /* Ограничение 60 FPS: Sleep только если кадр уложился быстрее TARGET_FRAME_SEC */
         double now = QuerySeconds();
         double elapsed = now - frameStart;
         if (elapsed < TARGET_FRAME_SEC) {

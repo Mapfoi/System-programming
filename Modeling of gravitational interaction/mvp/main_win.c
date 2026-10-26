@@ -1,3 +1,7 @@
+/*
+ * MVP main_win.c — WinMain: LoadLibrary → Init → цикл PeekMessage + PhysStep + GDI BitBlt.
+ * Буфер тел в exe (VirtualAlloc) обновляется через PhysSnapshotRead после каждого шага.
+ */
 #include "common.h"
 #include <windowsx.h>
 #include <math.h>
@@ -38,6 +42,7 @@ static void ScreenToWorld(int sx, int sy, int cw, int ch, double *wx, double *wy
     *wy = ((double)sy - ch * 0.5) / g_cfg.camZoom + g_cfg.camY;
 }
 
+/* Загрузка DLL из каталога exe */
 static BOOL LoadDll(wchar_t *err, size_t cap)
 {
     g_phys.hModule = LoadLibraryW(L"gravity_physics.dll");
@@ -237,6 +242,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show)
     MSG msg;
 
     while (run) {
+        /* Неблокирующая очередь сообщений: пока нет WM_QUIT, крутим симуляцию */
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { run = FALSE; break; }
             TranslateMessage(&msg);

@@ -1,3 +1,19 @@
+/*
+ * physics_dll.c — вычислительное ядро (gravity_physics.dll)
+ *
+ * Все экспорты обёрнуты в EnterCriticalSection(&g_eng.dataLock), кроме того что воркеры
+ * работают только пока lock держит главный поток внутри PhysStep — SnapshotRead тоже под lock.
+ *
+ * PhysResetPreset: заполняет bodies[], вызывает ComputeInitialAccelerations, energyBaseline.
+ * PhysStep(dt, subSteps): dt делится на subSteps → curDt; цикл subSteps × (фаза1+фаза2[+столкновения]).
+ * PhysLoadBodies: memcpy из снимка + пересчёт ускорений (после F9 в exe).
+ *
+ * Параллелизм: numWorkers потоков на барьере; поток 0 = тот, кто вызвал PhysStep из exe.
+ * CREATE_SUSPENDED при CreateThread — чтобы InitializeSynchronizationBarrier успел до первого Enter.
+ *
+ * Читать после common.h; до main_win.c.
+ */
+
 #include "common.h"
 #include <math.h>
 #include <stdlib.h>
@@ -5,6 +21,7 @@
 
 #define DLL_EXPORT __declspec(dllexport)
 
+/* ========== Глобальное состояние движка ========== */
 // Внутренний контекст вычислительного ядра в gravity_physics.dll
 typedef struct {
     Body                   *bodies;       // Выделяется через VirtualAlloc
@@ -80,7 +97,7 @@ static SIZE_T AlignTo64K(SIZE_T size)
     return (size + gran - 1) & ~(gran - 1);
 }
 
-// Запись текущей позиции тела в кольцевой буфер истории орбиты
+// Кольцевой буфер трека: trailHead — слот следующей записи; trailCount растёт до TRAIL_LENGTH
 static void PushTrailPoint(BodyMeta *m, double x, double y)
 {
     LONG head = m->trailHead;
@@ -91,6 +108,21 @@ static void PushTrailPoint(BodyMeta *m, double x, double y)
         m->trailCount++;
 }
 
+/* ========== Интегратор: один подшаг Verlet (фазы 1 и 2) ========== */
+/*
+ * Velocity Verlet для пары (r, v) при фиксированном шаге curDt:
+ *
+ *   1) r' = r + v*dt + 0.5*a*dt²          (сначала для всех тел)
+ *   2) вычислить a' из r' (силы от всех j: F_ij ∝ m_j * (r_j-r_i) / |r_ij|³, a_i = Σ F_ij/m_i)
+ *   3) v' = v + 0.5*(a + a')*dt,  a := a'
+ *
+ * Смягчение: |r_ij|² заменяется на |r_ij|² + ε² — убирает бесконечность при r→0 и стабилизирует Луну.
+ *
+ * Параллелизм: индексы тел раздаются через InterlockedExchangeAdd(&nextIndexPhase1, CHUNK_SIZE) —
+ * каждый поток берёт следующий кусок [start..end). После сдвига r ОБЯЗАТЕЛЕН барьер: иначе поток A
+ * читает r_j, пока поток B ещё не дописал r_j. Вторая фаза сил использует nextIndexPhase2 так же.
+ * Фаза 2 (скорости) режет массив статически: workerIdx получает свой диапазон i.
+ */
 // Фаза 1: параллельный расчет новых ускорений и потенциальной энергии (Velocity Verlet)
 static void ExecutePhase1_Forces(int workerIdx)
 {
@@ -154,6 +186,7 @@ static void ExecutePhase1_Forces(int workerIdx)
                     continue;
                 double dx = bodies[j].x - xi;
                 double dy = bodies[j].y - yi;
+                /* a_i += G * m_j * (r_j - r_i) / |r_ij|³  (компоненты dx, dy) */
                 double dist2 = dx * dx + dy * dy + eps2;
                 double invDist = 1.0 / sqrt(dist2);
                 double invDist3 = invDist * invDist * invDist;
@@ -161,6 +194,7 @@ static void ExecutePhase1_Forces(int workerIdx)
                 axi += dx * s;
                 ayi += dy * s;
 
+                /* Потенциальная энергия U = -Σ_{i<j} G m_i m_j / r_ij — считаем один раз на пару */
                 if (j > i) {
                     localU -= G * mi * bodies[j].mass * invDist;
                 }
@@ -213,7 +247,10 @@ static void ExecutePhase2_Integrate(int workerIdx)
     g_eng.partialK[workerIdx] = localK;
 }
 
-// Обработка неупругих столкновений (слияние тел с сохранением импульса и центра масс)
+/*
+ * Столкновения: O(n²) только на главном потоке после барьера (без гонок с воркерами).
+ * При пересечении радиусов — слияние в более массивное тело; v и r центра масс, absorb помечается !alive.
+ */
 static void ProcessCollisionsSingleThread(void)
 {
     if (!g_eng.enableCollisions)
@@ -260,6 +297,7 @@ static void ProcessCollisionsSingleThread(void)
     }
 }
 
+/* ========== Пул потоков (CreateThread + барьеры) ========== */
 // Функция рабочего потока пула (слайд 70: CreateThread + SYNCHRONIZATION_BARRIER)
 static DWORD WINAPI PhysicsWorkerProc(LPVOID param)
 {
@@ -421,7 +459,7 @@ static int InternalAddBody(double x, double y, double vx, double vy,
     return idx;
 }
 
-// Кеплерова орбита вокруг массивного центра (Солнце): v = sqrt(G*M/r), направление ⊥ к радиусу
+// Начальные условия: планета на окружности r под углом angle; v = sqrt(G*M/r) по касательной
 static int AddHeliocentricBody(double r, double mass, float rad, DWORD col,
                                double angle, double centralMass)
 {
@@ -434,7 +472,7 @@ static int AddHeliocentricBody(double r, double mass, float rad, DWORD col,
     return InternalAddBody(px, py, vx, vy, mass, rad, col);
 }
 
-// Спутник на круговой орбите вокруг уже добавленной планеты (скорость в системе отсчёта инерциальной)
+// Луна: позиция = позиция Земли + orbitR * unit; скорость = v_Земли + v_орбиты вокруг Земли (про grad)
 static void AddSatellitePrograde(int parentIdx, double orbitR, double satMass, float satRad,
                                  DWORD col, unsigned int *seed)
 {
@@ -445,7 +483,7 @@ static void AddSatellitePrograde(int parentIdx, double orbitR, double satMass, f
     double phase = RandUnit(seed) * 6.28318530718;
     double ux = cos(phase);
     double uy = sin(phase);
-    double tx = -uy;
+    double tx = -uy;  /* касательная к орбите спутника */
     double ty =  ux;
     double vmag = sqrt(G * p->mass / orbitR);
     InternalAddBody(p->x + orbitR * ux, p->y + orbitR * uy,
@@ -453,13 +491,19 @@ static void AddSatellitePrograde(int parentIdx, double orbitR, double satMass, f
                     satMass, satRad, col);
 }
 
-// Экспортируемые функции DLL
+/* ========== Экспорт DLL (вызывается из gravity_sim.exe) ========== */
+
+// PhysInit: VirtualAlloc под тела, CRITICAL_SECTION, запуск пула потоков
 DLL_EXPORT BOOL __cdecl PhysInit(const SimConfig *cfg)
 {
     InitializeCriticalSectionAndSpinCount(&g_eng.dataLock, 4000);
     QueryPerformanceFrequency(&g_eng.qpcFreq);
 
-    // Выделение страничной виртуальной памяти (слайд 118: VirtualAlloc, MEM_RESERVE | MEM_COMMIT)
+    /*
+     * Один вызов VirtualAlloc на весь пул: [Body×MAX][Meta×MAX][newAx×MAX][newAy×MAX].
+     * AlignTo64K — размер округляется до гранулы резервирования ВМ (64 КБ), как в лекции.
+     * newAx/newAy — отдельные массивы, чтобы фаза 1 писала ускорения без гонки с чтением ax в теле.
+     */
     SIZE_T szBodies = AlignTo64K(sizeof(Body) * MAX_BODIES);
     SIZE_T szMeta   = AlignTo64K(sizeof(BodyMeta) * MAX_BODIES);
     SIZE_T szAccel  = AlignTo64K(sizeof(double) * MAX_BODIES * 2);
@@ -553,6 +597,7 @@ DLL_EXPORT void __cdecl PhysAddCluster(double cx, double cy, int count)
     LeaveCriticalSection(&g_eng.dataLock);
 }
 
+// PhysResetPreset: очистка сцены и сборка одного из четырёх пресетов (см. ветки if ниже)
 DLL_EXPORT void __cdecl PhysResetPreset(int preset, int customCount)
 {
     EnterCriticalSection(&g_eng.dataLock);
@@ -568,6 +613,8 @@ DLL_EXPORT void __cdecl PhysResetPreset(int preset, int customCount)
     double G = g_eng.gravityG;
 
     if (preset == PRESET_SOLAR_SYSTEM) {
+        /* Пресет 1: кеплеровские круговые орбиты, барицентрический импульс на Солнце,
+         * Луна — спутник Земли (AddSatellitePrograde). Единицы: AU, M☉, сутки. */
         // 2D копланарная модель: длина AU, масса M☉, время сутки, G = 4π²/365.25²
         const double sunMass = 1.0;
         int sunIdx = InternalAddBody(0.0, 0.0, 0.0, 0.0, sunMass, 0.22f, RGB(255, 215, 60));
@@ -603,7 +650,7 @@ DLL_EXPORT void __cdecl PhysResetPreset(int preset, int customCount)
         // Луна: ~0.00257 AU, ~1.2% массы Земли (в M☉)
         AddSatellitePrograde(earthIdx, 0.00257, 3.7e-8, 0.014f, RGB(220, 225, 235), &seed);
 
-        // Солнце в покое в барицентрической СО: v☉ = −Σ mᵢvᵢ (M☉ = 1)
+        /* Импульс планет не нулевой (разные орбиты). Чтобы Σ m v = 0, Солнцу задаём v = −Σ mᵢvᵢ (M☉=1) */
         {
             double Px = 0.0, Py = 0.0;
             for (int i = 0; i < g_eng.bodyCount; ++i) {
@@ -721,6 +768,7 @@ DLL_EXPORT void __cdecl PhysResetPreset(int preset, int customCount)
     LeaveCriticalSection(&g_eng.dataLock);
 }
 
+// PhysStep: subSteps раз повторить барьер → фаза1 → барьер → фаза2; dt делится на subSteps
 DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
 {
     if (subSteps < 1) subSteps = 1;
@@ -734,24 +782,29 @@ DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
 
     for (int s = 0; s < subSteps; ++s) {
         g_eng.stepCounter++;
+        /* Точки трека пишем не каждый подшаг — только на чётных stepCounter, последний subStep кадра */
         g_eng.recordTrailThisStep = (s == subSteps - 1) && ((g_eng.stepCounter % 2) == 0);
         g_eng.nextIndexPhase1 = 0;
         g_eng.nextIndexPhase2 = 0;
 
-        // Барьер #1: пробуждаем фоновые рабочие потоки
+        /*
+         * Схема барьеров на один подшаг (numWorkers = N):
+         *   Главный поток входит в барьер #1 → все N потоков просыпаются и вызывают ExecutePhase1_Forces.
+         *   Внутри фазы 1 есть ещё барьер между «сдвиг r» и «счёт сил».
+         *   Барьер #3 — все закончили фазу 1; затем ExecutePhase2_Integrate.
+         *   Барьер #4 — готовы к следующему подшагу или к столкновениям.
+         * Воркеры крутятся в PhysicsWorkerProc в бесконечном цикле с теми же барьерами.
+         */
         if (g_eng.numWorkers > 1)
             EnterSynchronizationBarrier(&g_eng.barrier, 0);
 
-        // Поток 0 также участвует в вычислениях наравне с фоновыми потоками
         ExecutePhase1_Forces(0);
 
-        // Барьер #3: все потоки завершили расчет ускорений
         if (g_eng.numWorkers > 1)
             EnterSynchronizationBarrier(&g_eng.barrier, 0);
 
         ExecutePhase2_Integrate(0);
 
-        // Барьер #4: все потоки завершили обновление скоростей
         if (g_eng.numWorkers > 1)
             EnterSynchronizationBarrier(&g_eng.barrier, 0);
 
@@ -788,6 +841,7 @@ DLL_EXPORT void __cdecl PhysStep(double dt, int subSteps)
     LeaveCriticalSection(&g_eng.dataLock);
 }
 
+// Копия состояния под CRITICAL_SECTION — вызывается из UI-потока после PhysStep
 DLL_EXPORT int __cdecl PhysSnapshotRead(Body *outBodies, BodyMeta *outMeta,
                                         int maxCount, SimStats *outStats)
 {
