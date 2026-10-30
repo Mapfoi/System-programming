@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define MEMREPLACE_DLL_EXPORTS
 #include "memreplace_api.h"
+#include <psapi.h>
 #include <string.h>
 
 static BOOL RegionWritable(DWORD protect)
@@ -19,6 +20,60 @@ static BOOL RegionWritable(DWORD protect)
     default:
         return FALSE;
     }
+}
+
+static BOOL RegionOverlapsSkip(const MEMORY_BASIC_INFORMATION *mbi,
+                               const void *skipStart, SIZE_T skipSize)
+{
+    const unsigned char *regionStart;
+    const unsigned char *regionEnd;
+    const unsigned char *skipLo;
+    const unsigned char *skipHi;
+
+    if (!skipStart || skipSize == 0)
+        return FALSE;
+
+    regionStart = (const unsigned char *)mbi->BaseAddress;
+    regionEnd = regionStart + mbi->RegionSize;
+    skipLo = (const unsigned char *)skipStart;
+    skipHi = skipLo + skipSize;
+    return regionStart < skipHi && skipLo < regionEnd;
+}
+
+static BOOL RegionIsMainExeImage(const MEMORY_BASIC_INFORMATION *mbi)
+{
+    HMODULE mainMod;
+    MODULEINFO mi;
+    const unsigned char *regionStart;
+    const unsigned char *mainStart;
+    const unsigned char *mainEnd;
+
+    if (mbi->Type != MEM_IMAGE)
+        return FALSE;
+
+    mainMod = GetModuleHandleW(NULL);
+    if (!mainMod)
+        return FALSE;
+    if (!GetModuleInformation(GetCurrentProcess(), mainMod, &mi, sizeof(mi)))
+        return FALSE;
+
+    regionStart = (const unsigned char *)mbi->BaseAddress;
+    mainStart = (const unsigned char *)mi.lpBaseOfDll;
+    mainEnd = mainStart + mi.SizeOfImage;
+    return regionStart >= mainStart && regionStart < mainEnd;
+}
+
+static BOOL RegionSelected(const MEMORY_BASIC_INFORMATION *mbi, BOOL hostOnly)
+{
+    if (mbi->State != MEM_COMMIT || !RegionWritable(mbi->Protect))
+        return FALSE;
+
+    if (!hostOnly)
+        return (mbi->Type == MEM_PRIVATE || mbi->Type == MEM_IMAGE);
+
+    if (mbi->Type == MEM_PRIVATE)
+        return TRUE;
+    return RegionIsMainExeImage(mbi);
 }
 
 static int ReplaceInBuffer(unsigned char *base, SIZE_T size,
@@ -49,7 +104,8 @@ static int ReplaceInBuffer(unsigned char *base, SIZE_T size,
     return localMatches;
 }
 
-static int ScanCurrentProcess(const char *search, const char *replace, MemReplaceStats *stats)
+static int ScanProcessMemory(const char *search, const char *replace, MemReplaceStats *stats,
+                             const void *skipStart, SIZE_T skipSize, BOOL hostOnly)
 {
     SYSTEM_INFO si;
     unsigned char *cursor;
@@ -78,15 +134,15 @@ static int ScanCurrentProcess(const char *search, const char *replace, MemReplac
 
     while (cursor < maxAddr) {
         MEMORY_BASIC_INFORMATION mbi;
+        int found;
 
         if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
 
-        if (mbi.State == MEM_COMMIT &&
-            (mbi.Type == MEM_PRIVATE || mbi.Type == MEM_IMAGE) &&
-            RegionWritable(mbi.Protect)) {
-            int found = ReplaceInBuffer((unsigned char *)mbi.BaseAddress, mbi.RegionSize,
-                                        search, replace, searchLen, stats);
+        if (!RegionOverlapsSkip(&mbi, skipStart, skipSize) &&
+            RegionSelected(&mbi, hostOnly)) {
+            found = ReplaceInBuffer((unsigned char *)mbi.BaseAddress, mbi.RegionSize,
+                                    search, replace, searchLen, stats);
             total += found;
             if (stats) {
                 stats->regionsScanned++;
@@ -102,24 +158,22 @@ static int ScanCurrentProcess(const char *search, const char *replace, MemReplac
 
 MEMREPLACE_API int __cdecl MemReplaceStringA(const char *search, const char *replace, MemReplaceStats *stats)
 {
-    return ScanCurrentProcess(search, replace, stats);
+    return ScanProcessMemory(search, replace, stats, NULL, 0, FALSE);
 }
 
 MEMREPLACE_API DWORD WINAPI MemReplaceRemoteEntry(LPVOID lpParameter)
 {
-    MemReplaceParams params;
     MemReplaceStats stats = {0};
     int replaced;
+    static const char kSearch[] = "Lab5OldString!!";
+    static const char kReplace[] = "Lab5NewString!!";
 
-    if (!lpParameter)
-        return (DWORD)-1;
+    (void)lpParameter;
 
-    memcpy(&params, lpParameter, sizeof(params));
-    params.search[sizeof(params.search) - 1] = '\0';
-    params.replace[sizeof(params.replace) - 1] = '\0';
-
-    replaced = ScanCurrentProcess(params.search, params.replace, &stats);
-    return (DWORD)(replaced >= 0 ? replaced : -1);
+    /* Строки в .rdata DLL (не сканируется); блок lpParameter исключён на случай аргументов. */
+    replaced = ScanProcessMemory(kSearch, kReplace, &stats,
+                                 lpParameter, lpParameter ? sizeof(MemReplaceParams) : 0, TRUE);
+    return (DWORD)(replaced >= 0 ? (DWORD)replaced : (DWORD)-1);
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)

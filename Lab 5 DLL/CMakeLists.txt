@@ -19,7 +19,7 @@ else ()
     target_compile_options(memreplace PRIVATE -Wall -Wextra)
 endif ()
 
-target_link_libraries(memreplace PRIVATE kernel32)
+target_link_libraries(memreplace PRIVATE kernel32 psapi)
 
 add_executable(Lab5Static static_import.c)
 add_executable(Lab5Dynamic dynamic_import.c)

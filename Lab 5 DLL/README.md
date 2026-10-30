@@ -37,12 +37,14 @@ Lab5Dynamic.exe
 
 ### Внедрение (remote thread)
 
-1. Запустить `Lab5Target.exe` — в консоли будет **PID** и строка `Lab5OldString!!`.
-2. В другой консоли из той же папки, где лежит `memreplace.dll`:
+1. Запустить **`Lab5Target.exe`** — в консоли **PID** и строка `Lab5OldString!!`.
+2. В **другой** консоли из каталога `build`:
 
 ```text
 Lab5Inject.exe <PID>
 ```
+
+`Lab5Dynamic.exe` **не принимает PID** — он работает только в своём процессе. Для мишени используйте **Lab5Inject**.
 
 Инжектор:
 
