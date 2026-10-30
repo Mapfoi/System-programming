@@ -11,9 +11,18 @@
 
 ## Сборка
 
-1. Toolchain: MinGW-w64 или MSVC  
-2. Reload CMake Project  
-3. Собрать target `all` — в каталоге `cmake-build-*` или `build` лежат `memreplace.dll` и все `.exe`.
+1. Toolchain: MinGW-w64 или MSVC (в CLion: bundled MinGW + CMake).
+2. Reload CMake Project → Build `all`.
+3. Артефакты: `cmake-build-*` или локальный каталог `build/` — там `memreplace.dll` и все `.exe`.
+
+Пример из командной строки (CLion):
+
+```text
+cmake -S "Lab 5 DLL" -B "Lab 5 DLL/build" -G Ninja ^
+  -DCMAKE_C_COMPILER=".../mingw/bin/gcc.exe" ^
+  -DCMAKE_MAKE_PROGRAM=ninja
+cmake --build "Lab 5 DLL/build"
+```
 
 ## Проверка
 
@@ -55,3 +64,13 @@ Lab5Inject.exe <PID>
 | `dynamic_import.c` | `LoadLibraryW` + `GetProcAddress` |
 | `inject_remote.c` | LoadLibraryW и вызов функции DLL в чужом процессе |
 | `target_host.c` | Долгоживущий процесс с тестовой строкой в RW-памяти |
+| `build_report.py` | Генерация отчёта `otchet5_DLL.docx` |
+
+## Отчёт
+
+```text
+pip install python-docx lxml
+python build_report.py
+```
+
+Файл **`otchet5_DLL.docx`**: шапка «ФИО группа», затем код всех модулей; имена WinAPI и ключевых функций выделены полужирным (как в лаб. 4).

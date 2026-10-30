@@ -4,6 +4,7 @@
 #include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <tlhelp32.h>
 
 static BOOL EnableDebugPrivilege(void)
 {
@@ -14,7 +15,7 @@ static BOOL EnableDebugPrivilege(void)
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
         return FALSE;
 
-    if (!LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &luid)) {
+    if (!LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &luid)) {
         CloseHandle(token);
         return FALSE;
     }
@@ -46,7 +47,31 @@ static BOOL ResolveDllPath(wchar_t *path, size_t cap)
     return TRUE;
 }
 
-static BOOL InjectLibrary(HANDLE process, const wchar_t *dllPath, HMODULE *remoteModuleOut)
+static HMODULE FindRemoteModule(DWORD pid, const wchar_t *dllFileName)
+{
+    HANDLE snap;
+    MODULEENTRY32W me;
+    HMODULE found = NULL;
+
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE)
+        return NULL;
+
+    me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me)) {
+        do {
+            if (_wcsicmp(me.szModule, dllFileName) == 0) {
+                found = (HMODULE)me.modBaseAddr;
+                break;
+            }
+        } while (Module32NextW(snap, &me));
+    }
+
+    CloseHandle(snap);
+    return found;
+}
+
+static BOOL InjectLibrary(HANDLE process, DWORD pid, const wchar_t *dllPath, HMODULE *remoteModuleOut)
 {
     SIZE_T pathBytes;
     LPVOID remotePath = NULL;
@@ -77,8 +102,11 @@ static BOOL InjectLibrary(HANDLE process, const wchar_t *dllPath, HMODULE *remot
     if (!GetExitCodeThread(thread, &exitCode) || exitCode == 0)
         goto cleanup;
 
-    if (remoteModuleOut)
-        *remoteModuleOut = (HMODULE)(ULONG_PTR)exitCode;
+    if (remoteModuleOut) {
+        *remoteModuleOut = FindRemoteModule(pid, L"memreplace.dll");
+        if (!*remoteModuleOut)
+            *remoteModuleOut = (HMODULE)(ULONG_PTR)exitCode;
+    }
     ok = TRUE;
 
 cleanup:
@@ -135,13 +163,18 @@ static BOOL CallRemoteReplace(HANDLE process, FARPROC remoteEntry,
         goto cleanup;
 
     thread = CreateRemoteThread(process, NULL, 0,
-                                (LPTHREAD_START_ROUTINE)remoteEntry, remoteParams, 0, NULL);
+                                (LPTHREAD_START_ROUTINE)(void *)remoteEntry, remoteParams, 0, NULL);
     if (!thread)
         goto cleanup;
 
     WaitForSingleObject(thread, INFINITE);
-    if (!GetExitCodeThread(thread, &exitCode))
+    if (!GetExitCodeThread(thread, &exitCode) || exitCode == STILL_ACTIVE)
         goto cleanup;
+    if (exitCode >= 0x80000000UL) {
+        if (replacedOut)
+            *replacedOut = 0;
+        goto cleanup;
+    }
 
     if (replacedOut)
         *replacedOut = exitCode;
@@ -200,7 +233,7 @@ int main(int argc, char **argv)
     wprintf(L"Целевой процесс PID=%lu\n", pid);
     wprintf(L"DLL: %ls\n", dllPath);
 
-    if (!InjectLibrary(process, dllPath, &remoteModule)) {
+    if (!InjectLibrary(process, pid, dllPath, &remoteModule)) {
         wprintf(L"Внедрение LoadLibraryW не удалось, код %lu\n", GetLastError());
         CloseHandle(process);
         return 1;
@@ -221,9 +254,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (replaced == 0 || replaced >= 0x80000000UL) {
+        wprintf(L"Удалённая замена не выполнена (код потока %lu)\n", replaced);
+        CloseHandle(process);
+        return 1;
+    }
+
     wprintf(L"Удалённая замена выполнена, вхождений: %lu\n", replaced);
     wprintf(L"Проверьте окно Lab5Target — строка должна стать \"%hs\".\n", replace);
 
     CloseHandle(process);
-    return replaced == 0 ? 2 : 0;
+    return 0;
 }

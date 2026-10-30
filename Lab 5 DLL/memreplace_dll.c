@@ -82,7 +82,9 @@ static int ScanCurrentProcess(const char *search, const char *replace, MemReplac
         if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
 
-        if (mbi.State == MEM_COMMIT && RegionWritable(mbi.Protect)) {
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Type == MEM_PRIVATE || mbi.Type == MEM_IMAGE) &&
+            RegionWritable(mbi.Protect)) {
             int found = ReplaceInBuffer((unsigned char *)mbi.BaseAddress, mbi.RegionSize,
                                         search, replace, searchLen, stats);
             total += found;
