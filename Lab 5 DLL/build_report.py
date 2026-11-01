@@ -21,12 +21,10 @@ SECTIONS = [
 ]
 
 INTRO = [
-    "// Лабораторная работа 5. Динамически загружаемая библиотека (DLL).",
-    "// DLL — модуль с кодом и данными, подключаемый к процессу при загрузке или по LoadLibrary.",
-    "// Статический импорт: линковщик записывает зависимость от DLL, функции вызываются по IAT.",
-    "// Динамический импорт: LoadLibraryW загружает DLL, GetProcAddress возвращает адрес экспорта.",
-    "// Внедрение DLL: CreateRemoteThread в чужом процессе вызывает LoadLibraryW с путём к файлу.",
-    "// После загрузки адрес экспорта в целевом процессе = база модуля + смещение от локальной загрузки.",
+    "// Лабораторная 5. Источник: OSiSP.2021-09-29.pdf",
+    "// с. 46–52 — DLL, __declspec(dllexport/dllimport), LoadLibrary, GetProcAddress, DllMain",
+    "// с. 118 — VirtualQuery, VirtualProtect, VirtualAlloc",
+    "// с. 156 — CreateRemoteThread, VirtualAllocEx, WriteProcessMemory, LoadLibraryW",
     "",
 ]
 

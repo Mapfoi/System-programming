@@ -196,8 +196,8 @@ int main(int argc, char **argv)
     HMODULE remoteModule = NULL;
     FARPROC remoteFn = NULL;
     DWORD replaced = 0;
-    const char *search = "Lab5OldString!!";
-    const char *replace = "Lab5NewString!!";
+    const char *search = LAB5_DEMO_SEARCH;
+    const char *replace = LAB5_DEMO_REPLACE;
 
     _setmode(_fileno(stdout), _O_U16TEXT);
 

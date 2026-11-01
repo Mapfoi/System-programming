@@ -1,8 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define MEMREPLACE_DLL_EXPORTS
 #include "memreplace_api.h"
-#include <psapi.h>
 #include <string.h>
+
+/* Обход виртуальной памяти процесса: VirtualQuery + VirtualProtect (OSiSP, с. 118). */
 
 static BOOL RegionWritable(DWORD protect)
 {
@@ -40,40 +41,15 @@ static BOOL RegionOverlapsSkip(const MEMORY_BASIC_INFORMATION *mbi,
     return regionStart < skipHi && skipLo < regionEnd;
 }
 
-static BOOL RegionIsMainExeImage(const MEMORY_BASIC_INFORMATION *mbi)
-{
-    HMODULE mainMod;
-    MODULEINFO mi;
-    const unsigned char *regionStart;
-    const unsigned char *mainStart;
-    const unsigned char *mainEnd;
-
-    if (mbi->Type != MEM_IMAGE)
-        return FALSE;
-
-    mainMod = GetModuleHandleW(NULL);
-    if (!mainMod)
-        return FALSE;
-    if (!GetModuleInformation(GetCurrentProcess(), mainMod, &mi, sizeof(mi)))
-        return FALSE;
-
-    regionStart = (const unsigned char *)mbi->BaseAddress;
-    mainStart = (const unsigned char *)mi.lpBaseOfDll;
-    mainEnd = mainStart + mi.SizeOfImage;
-    return regionStart >= mainStart && regionStart < mainEnd;
-}
-
 static BOOL RegionSelected(const MEMORY_BASIC_INFORMATION *mbi, BOOL hostOnly)
 {
     if (mbi->State != MEM_COMMIT || !RegionWritable(mbi->Protect))
         return FALSE;
 
-    if (!hostOnly)
-        return (mbi->Type == MEM_PRIVATE || mbi->Type == MEM_IMAGE);
+    if (hostOnly)
+        return (mbi->Type == MEM_PRIVATE);
 
-    if (mbi->Type == MEM_PRIVATE)
-        return TRUE;
-    return RegionIsMainExeImage(mbi);
+    return (mbi->Type == MEM_PRIVATE || mbi->Type == MEM_IMAGE);
 }
 
 static int ReplaceInBuffer(unsigned char *base, SIZE_T size,
@@ -165,15 +141,16 @@ MEMREPLACE_API DWORD WINAPI MemReplaceRemoteEntry(LPVOID lpParameter)
 {
     MemReplaceStats stats = {0};
     int replaced;
-    static const char kSearch[] = "Lab5OldString!!";
-    static const char kReplace[] = "Lab5NewString!!";
 
-    (void)lpParameter;
+    if (!lpParameter)
+        return (DWORD)-1;
 
-    /* Строки в .rdata DLL (не сканируется); блок lpParameter исключён на случай аргументов. */
-    replaced = ScanProcessMemory(kSearch, kReplace, &stats,
-                                 lpParameter, lpParameter ? sizeof(MemReplaceParams) : 0, TRUE);
-    return (DWORD)(replaced >= 0 ? (DWORD)replaced : (DWORD)-1);
+    /* lpParameter — блок MemReplaceParams из WriteProcessMemory (OSiSP, с. 156). */
+    replaced = ScanProcessMemory(LAB5_DEMO_SEARCH, LAB5_DEMO_REPLACE, &stats,
+                                 lpParameter, sizeof(MemReplaceParams), TRUE);
+    if (replaced < 0)
+        return (DWORD)-1;
+    return (DWORD)replaced;
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)

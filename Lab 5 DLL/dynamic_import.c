@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static volatile char g_demoBuffer[] = "Lab5OldString!!";
+static volatile char g_demoBuffer[] = LAB5_DEMO_SEARCH;
 
 static BOOL ResolveDllPath(wchar_t *path, size_t cap)
 {
@@ -60,7 +60,7 @@ int main(void)
     wprintf(L"Указатель на функцию: %p\n", (void *)fn);
 
     wprintf(L"До замены: \"%hs\"\n", (const char *)g_demoBuffer);
-    count = fn("Lab5OldString!!", "Lab5NewString!!", &stats);
+    count = fn(LAB5_DEMO_SEARCH, LAB5_DEMO_REPLACE, &stats);
     wprintf(L"После замены: \"%hs\"\n", (const char *)g_demoBuffer);
     wprintf(L"Заменено вхождений: %d (регионов: %lu, байт: %lu)\n",
             count, stats.regionsScanned, stats.bytesWritten);

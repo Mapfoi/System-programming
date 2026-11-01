@@ -4,7 +4,7 @@
 #include <io.h>
 #include <stdio.h>
 
-static volatile char g_demoBuffer[] = "Lab5OldString!!";
+static volatile char g_demoBuffer[] = LAB5_DEMO_SEARCH;
 
 int main(void)
 {
@@ -19,7 +19,7 @@ int main(void)
     wprintf(L"Указатель на экспорт DLL: %p\n", (void *)fn);
 
     wprintf(L"До замены: \"%hs\"\n", (const char *)g_demoBuffer);
-    count = fn("Lab5OldString!!", "Lab5NewString!!", &stats);
+    count = fn(LAB5_DEMO_SEARCH, LAB5_DEMO_REPLACE, &stats);
     wprintf(L"После замены: \"%hs\"\n", (const char *)g_demoBuffer);
     wprintf(L"Заменено вхождений: %d (регионов: %lu, байт: %lu)\n",
             count, stats.regionsScanned, stats.bytesWritten);

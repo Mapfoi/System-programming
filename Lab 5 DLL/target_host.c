@@ -1,13 +1,11 @@
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "memreplace_api.h"
 #include <fcntl.h>
 #include <io.h>
 #include <stdio.h>
 #include <string.h>
 
-#define LAB5_NEEDLE "Lab5OldString!!"
-
-/* RW-блок через VirtualAlloc — его видит сканер MEM_PRIVATE после внедрения DLL. */
+/* RW-блок через VirtualAlloc (OSiSP, с. 118) — регион MEM_PRIVATE. */
 static char *g_lab5Needle = NULL;
 
 static void PrintBanner(void)
@@ -26,14 +24,14 @@ int main(void)
 
     _setmode(_fileno(stdout), _O_U16TEXT);
 
-    needleLen = strlen(LAB5_NEEDLE);
+    needleLen = strlen(LAB5_DEMO_SEARCH);
     g_lab5Needle = (char *)VirtualAlloc(NULL, needleLen + 1,
                                         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!g_lab5Needle) {
         wprintf(L"VirtualAlloc не удался\n");
         return 1;
     }
-    memcpy(g_lab5Needle, LAB5_NEEDLE, needleLen + 1);
+    memcpy(g_lab5Needle, LAB5_DEMO_SEARCH, needleLen + 1);
 
     PrintBanner();
 
