@@ -29,6 +29,7 @@ artifacts/
 .idea/
 .vscode/
 cmake-build-*/
+**/Lab 5 DLL/build/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
