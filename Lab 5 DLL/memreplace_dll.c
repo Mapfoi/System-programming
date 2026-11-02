@@ -1,17 +1,16 @@
 #define WIN32_LEAN_AND_MEAN
-#define MEMREPLACE_DLL_EXPORTS
-#include "memreplace_api.h"
+#include <windows.h>
 #include <string.h>
 
-/* Обход виртуальной памяти процесса: VirtualQuery + VirtualProtect (OSiSP, с. 118). */
+// Строки для демонстрации (длины search и replace должны совпадать)
+#define LAB5_SEARCH "Lab5OldString!!"
+#define LAB5_REPLACE "Lab5NewString!!"
 
-static BOOL RegionWritable(DWORD protect)
+// Можно ли писать в регион с такой маской защиты страниц
+static BOOL PageWritable(DWORD protect)
 {
-    if (protect & PAGE_GUARD)
+    if (protect & (PAGE_GUARD | PAGE_NOACCESS))
         return FALSE;
-    if (protect & PAGE_NOACCESS)
-        return FALSE;
-
     switch (protect & 0xFF) {
     case PAGE_READWRITE:
     case PAGE_WRITECOPY:
@@ -23,140 +22,73 @@ static BOOL RegionWritable(DWORD protect)
     }
 }
 
-static BOOL RegionOverlapsSkip(const MEMORY_BASIC_INFORMATION *mbi,
-                               const void *skipStart, SIZE_T skipSize)
-{
-    const unsigned char *regionStart;
-    const unsigned char *regionEnd;
-    const unsigned char *skipLo;
-    const unsigned char *skipHi;
-
-    if (!skipStart || skipSize == 0)
-        return FALSE;
-
-    regionStart = (const unsigned char *)mbi->BaseAddress;
-    regionEnd = regionStart + mbi->RegionSize;
-    skipLo = (const unsigned char *)skipStart;
-    skipHi = skipLo + skipSize;
-    return regionStart < skipHi && skipLo < regionEnd;
-}
-
-static BOOL RegionSelected(const MEMORY_BASIC_INFORMATION *mbi, BOOL hostOnly)
-{
-    if (mbi->State != MEM_COMMIT || !RegionWritable(mbi->Protect))
-        return FALSE;
-
-    if (hostOnly)
-        return (mbi->Type == MEM_PRIVATE);
-
-    return (mbi->Type == MEM_PRIVATE || mbi->Type == MEM_IMAGE);
-}
-
-static int ReplaceInBuffer(unsigned char *base, SIZE_T size,
-                           const char *search, const char *replace,
-                           size_t len, MemReplaceStats *stats)
-{
-    int localMatches = 0;
-    SIZE_T i;
-
-    if (len == 0 || size < len)
-        return 0;
-
-    for (i = 0; i + len <= size; ++i) {
-        if (memcmp(base + i, search, len) != 0)
-            continue;
-
-        DWORD oldProtect = 0;
-        if (!VirtualProtect(base + i, len, PAGE_READWRITE, &oldProtect))
-            continue;
-
-        memcpy(base + i, replace, len);
-        VirtualProtect(base + i, len, oldProtect, &oldProtect);
-
-        localMatches++;
-        if (stats)
-            stats->bytesWritten += (DWORD)len;
-    }
-    return localMatches;
-}
-
-static int ScanProcessMemory(const char *search, const char *replace, MemReplaceStats *stats,
-                             const void *skipStart, SIZE_T skipSize, BOOL hostOnly)
+// Поиск search по виртуальной памяти текущего процесса и замена на replace
+__declspec(dllexport) int __cdecl MemReplaceStringA(const char *search, const char *replace)
 {
     SYSTEM_INFO si;
-    unsigned char *cursor;
-    unsigned char *maxAddr;
-    size_t searchLen;
-    size_t replaceLen;
-    int total = 0;
+    unsigned char *addr;
+    unsigned char *limit;
+    size_t len;
+    int count = 0;
 
     if (!search || !replace)
         return -1;
+    len = strlen(search);
+    if (len == 0 || len != strlen(replace))
+        return -1;
 
-    searchLen = strlen(search);
-    replaceLen = strlen(replace);
-    if (searchLen == 0 || searchLen != replaceLen)
-        return -2;
-
-    if (stats) {
-        stats->regionsScanned = 0;
-        stats->matchesFound = 0;
-        stats->bytesWritten = 0;
-    }
-
+    // Границы пользовательского адресного пространства процесса
     GetSystemInfo(&si);
-    cursor = (unsigned char *)si.lpMinimumApplicationAddress;
-    maxAddr = (unsigned char *)si.lpMaximumApplicationAddress;
+    addr = (unsigned char *)si.lpMinimumApplicationAddress;
+    limit = (unsigned char *)si.lpMaximumApplicationAddress;
 
-    while (cursor < maxAddr) {
+    // Обход регионов памяти через VirtualQuery
+    while (addr < limit) {
         MEMORY_BASIC_INFORMATION mbi;
-        int found;
+        SIZE_T pos;
 
-        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi))
+        if (VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
 
-        if (!RegionOverlapsSkip(&mbi, skipStart, skipSize) &&
-            RegionSelected(&mbi, hostOnly)) {
-            found = ReplaceInBuffer((unsigned char *)mbi.BaseAddress, mbi.RegionSize,
-                                    search, replace, searchLen, stats);
-            total += found;
-            if (stats) {
-                stats->regionsScanned++;
-                stats->matchesFound += (DWORD)found;
+        // Только переданные в память регионы, куда разрешена запись
+        if (mbi.State == MEM_COMMIT && PageWritable(mbi.Protect) && mbi.RegionSize >= len) {
+            unsigned char *base = (unsigned char *)mbi.BaseAddress;
+            for (pos = 0; pos + len <= mbi.RegionSize; ++pos) {
+                if (memcmp(base + pos, search, len) != 0)
+                    continue;
+                {
+                    DWORD old = 0;
+                    // Временно разрешаем запись, подменяем байты, восстанавливаем права
+                    if (!VirtualProtect(base + pos, len, PAGE_READWRITE, &old))
+                        continue;
+                    memcpy(base + pos, replace, len);
+                    VirtualProtect(base + pos, len, old, &old);
+                    count++;
+                }
             }
         }
 
-        cursor = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+        addr = (unsigned char *)mbi.BaseAddress + mbi.RegionSize;
     }
 
-    return total;
+    return count;
 }
 
-MEMREPLACE_API int __cdecl MemReplaceStringA(const char *search, const char *replace, MemReplaceStats *stats)
+// Точка входа для CreateRemoteThread в чужом процессе (после LoadLibraryW)
+__declspec(dllexport) DWORD WINAPI MemReplaceRemoteEntry(LPVOID lpParameter)
 {
-    return ScanProcessMemory(search, replace, stats, NULL, 0, FALSE);
+    int count;
+
+    (void)lpParameter;
+    count = MemReplaceStringA(LAB5_SEARCH, LAB5_REPLACE);
+    return (count < 0) ? (DWORD)-1 : (DWORD)count;
 }
 
-MEMREPLACE_API DWORD WINAPI MemReplaceRemoteEntry(LPVOID lpParameter)
+// Точка входа DLL (здесь инициализация не требуется)
+BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 {
-    MemReplaceStats stats = {0};
-    int replaced;
-
-    if (!lpParameter)
-        return (DWORD)-1;
-
-    /* lpParameter — блок MemReplaceParams из WriteProcessMemory (OSiSP, с. 156). */
-    replaced = ScanProcessMemory(LAB5_DEMO_SEARCH, LAB5_DEMO_REPLACE, &stats,
-                                 lpParameter, sizeof(MemReplaceParams), TRUE);
-    if (replaced < 0)
-        return (DWORD)-1;
-    return (DWORD)replaced;
-}
-
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
-{
-    (void)hinstDLL;
-    (void)lpvReserved;
-    (void)fdwReason;
+    (void)hinst;
+    (void)reason;
+    (void)reserved;
     return TRUE;
 }

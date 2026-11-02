@@ -7,7 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
-add_library(memreplace SHARED memreplace_dll.c memreplace_api.h)
+add_library(memreplace SHARED memreplace_dll.c)
 set_target_properties(memreplace PROPERTIES
     PREFIX ""
     OUTPUT_NAME "memreplace"
