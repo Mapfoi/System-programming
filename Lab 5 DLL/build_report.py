@@ -19,7 +19,11 @@ FRAGMENTS = [
     ],
     [
         "// --- memreplace_dll.c ---",
-        (ROOT / "memreplace_dll.c", 9, 94),
+        (ROOT / "memreplace_dll.c", 1, 87),
+    ],
+    [
+        "// --- notepad_dll.c (отдельная DLL для Блокнота) ---",
+        (ROOT / "notepad_dll.c", 1, 95),
     ],
     [
         "// --- static_import.c ---",
@@ -39,7 +43,11 @@ FRAGMENTS = [
     ],
     [
         "// --- inject_remote.c (main) ---",
-        (ROOT / "inject_remote.c", 130, 169),
+        (ROOT / "inject_remote.c", 107, 175),
+    ],
+    [
+        "// --- inject_notepad.c ---",
+        (ROOT / "inject_notepad.c", 1, 178),
     ],
     [
         "// --- target_host.c ---",
@@ -56,7 +64,9 @@ BOLD_RE = re.compile(
     r"CreateToolhelp32Snapshot|Module32FirstW|Module32NextW|"
     r"GetTickCount|Sleep|fflush|_setmode|_fileno|wprintf|wcslen|wcscat|wcsrchr|"
     r"strtoul|strncpy|memset|memcpy|memcmp|strlen|"
-    r"DllMain|MemReplaceStringA|MemReplaceRemoteEntry|PageWritable|"
+    r"NotepadRemoteEntry|ReplaceNotepadEdit|"
+    r"DllMain|MemReplaceStringA|MemReplaceRemoteEntry|RegionWritable|"
+    r"SetWindowTextW|GetWindowTextLengthW|GetWindowTextW|EnumWindows|EnumChildWindows|"
     r"RemoteModuleBase|RemoteProcAddress|RemoteLoadDll|WaitConsole|DllPathNextToExe|"
     r"__declspec|__cdecl|WINAPI|MEM_COMMIT|PAGE_READWRITE|PROCESS_CREATE_THREAD"
     r")\b"

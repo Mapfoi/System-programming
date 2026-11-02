@@ -4,7 +4,15 @@
 #include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <tlhelp32.h>
+
+#define LAB5_PAIR_MAX 260
+
+typedef struct {
+    char find[LAB5_PAIR_MAX];
+    char replace[LAB5_PAIR_MAX];
+} MemReplaceRemoteParams;
 
 static BOOL DllPathNextToExe(wchar_t *path, size_t cap)
 {
@@ -23,7 +31,6 @@ static BOOL DllPathNextToExe(wchar_t *path, size_t cap)
     return TRUE;
 }
 
-// Базовый адрес memreplace.dll в списке модулей целевого процесса
 static HMODULE RemoteModuleBase(DWORD pid)
 {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -45,7 +52,6 @@ static HMODULE RemoteModuleBase(DWORD pid)
     return base;
 }
 
-// Адрес экспорта в целевом процессе: база_мишени + (локальный_адрес − локальная_база)
 static FARPROC RemoteProcAddress(HMODULE remoteBase, const wchar_t *dllPath, const char *name)
 {
     HMODULE local = LoadLibraryW(dllPath);
@@ -64,7 +70,6 @@ static FARPROC RemoteProcAddress(HMODULE remoteBase, const wchar_t *dllPath, con
     return (FARPROC)((ULONG_PTR)remoteBase + delta);
 }
 
-// Внедрение DLL: удалённый поток вызывает LoadLibraryW с путём в памяти мишени
 static BOOL RemoteLoadDll(HANDLE proc, DWORD pid, const wchar_t *dllPath, HMODULE *outBase)
 {
     SIZE_T bytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
@@ -74,18 +79,14 @@ static BOOL RemoteLoadDll(HANDLE proc, DWORD pid, const wchar_t *dllPath, HMODUL
     DWORD code = 0;
     BOOL ok = FALSE;
 
-    // Выделяем память в целевом процессе под wide-путь к DLL
     remote = VirtualAllocEx(proc, NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote)
         return FALSE;
 
-    // Записываем путь в память целевого процесса
     if (WriteProcessMemory(proc, remote, dllPath, bytes, NULL)) {
-        // Адрес LoadLibraryW в kernel32 (одинаков для процессов одной сессии)
         loadLib = (LPTHREAD_START_ROUTINE)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
                                                                "LoadLibraryW");
         if (loadLib) {
-            // Удалённый поток в мишени выполнит LoadLibraryW(remote)
             th = CreateRemoteThread(proc, NULL, 0, loadLib, remote, 0, NULL);
             if (th) {
                 WaitForSingleObject(th, INFINITE);
@@ -113,11 +114,18 @@ int main(int argc, char **argv)
     FARPROC remoteFn;
     HANDLE th;
     DWORD result = 0;
+    MemReplaceRemoteParams localParams;
+    LPVOID remoteParams = NULL;
 
     _setmode(_fileno(stdout), _O_U16TEXT);
 
-    if (argc < 2) {
-        wprintf(L"Lab5Inject <PID>\n");
+    if (argc < 4) {
+        wprintf(L"Lab5Inject <PID> <find> <replace>\n");
+        return 1;
+    }
+
+    if (strlen(argv[2]) != strlen(argv[3])) {
+        wprintf(L"find и replace — одной длины\n");
         return 1;
     }
 
@@ -127,7 +135,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // Открываем целевой процесс
+    memset(&localParams, 0, sizeof(localParams));
+    strncpy(localParams.find, argv[2], LAB5_PAIR_MAX - 1);
+    strncpy(localParams.replace, argv[3], LAB5_PAIR_MAX - 1);
+
+    wprintf(L"memreplace.dll: %ls\n", dllPath);
+
     proc = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                           PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
                       FALSE, pid);
@@ -136,14 +149,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // Шаг 1: загрузить memreplace.dll в мишень через LoadLibraryW
     if (!RemoteLoadDll(proc, pid, dllPath, &remoteBase)) {
         wprintf(L"не удалось загрузить DLL в процесс\n");
         CloseHandle(proc);
         return 1;
     }
 
-    // Шаг 2: вычислить адрес MemReplaceRemoteEntry в адресном пространстве мишени
     remoteFn = RemoteProcAddress(remoteBase, dllPath, "MemReplaceRemoteEntry");
     if (!remoteFn) {
         wprintf(L"не найден MemReplaceRemoteEntry\n");
@@ -151,20 +162,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    wprintf(L"функция DLL в целевом процессе: %p\n", (void *)remoteFn);
+    remoteParams = VirtualAllocEx(proc, NULL, sizeof(localParams), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remoteParams || !WriteProcessMemory(proc, remoteParams, &localParams, sizeof(localParams), NULL)) {
+        wprintf(L"VirtualAllocEx/WriteProcessMemory (params): %lu\n", GetLastError());
+        if (remoteParams)
+            VirtualFreeEx(proc, remoteParams, 0, MEM_RELEASE);
+        CloseHandle(proc);
+        return 1;
+    }
 
-    // Шаг 3: второй удалённый поток — вызов функции DLL уже внутри мишени
-    th = CreateRemoteThread(proc, NULL, 0, (LPTHREAD_START_ROUTINE)(void *)remoteFn, NULL, 0, NULL);
+    th = CreateRemoteThread(proc, NULL, 0, (LPTHREAD_START_ROUTINE)(void *)remoteFn, remoteParams, 0, NULL);
     if (!th) {
         wprintf(L"CreateRemoteThread: %lu\n", GetLastError());
+        VirtualFreeEx(proc, remoteParams, 0, MEM_RELEASE);
         CloseHandle(proc);
         return 1;
     }
     WaitForSingleObject(th, INFINITE);
     GetExitCodeThread(th, &result);
     CloseHandle(th);
+    VirtualFreeEx(proc, remoteParams, 0, MEM_RELEASE);
     CloseHandle(proc);
 
-    wprintf(L"вызов завершён, код %lu\n", result);
-    return 0;
+    if ((LONG)(DWORD)result == -1)
+        wprintf(L"ошибка или замен не найдено\n");
+    else
+        wprintf(L"замен в памяти мишени: %lu\n", result);
+    return ((LONG)(DWORD)result == -1) ? 1 : 0;
 }

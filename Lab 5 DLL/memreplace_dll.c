@@ -2,12 +2,14 @@
 #include <windows.h>
 #include <string.h>
 
-// Строки для демонстрации (длины search и replace должны совпадать)
-#define LAB5_SEARCH "Lab5OldString!!"
-#define LAB5_REPLACE "Lab5NewString!!"
+#define LAB5_PAIR_MAX 260
 
-// Можно ли писать в регион с такой маской защиты страниц
-static BOOL PageWritable(DWORD protect)
+typedef struct {
+    char find[LAB5_PAIR_MAX];
+    char replace[LAB5_PAIR_MAX];
+} MemReplaceRemoteParams;
+
+static BOOL RegionWritable(DWORD protect)
 {
     if (protect & (PAGE_GUARD | PAGE_NOACCESS))
         return FALSE;
@@ -22,7 +24,6 @@ static BOOL PageWritable(DWORD protect)
     }
 }
 
-// Поиск search по виртуальной памяти текущего процесса и замена на replace
 __declspec(dllexport) int __cdecl MemReplaceStringA(const char *search, const char *replace)
 {
     SYSTEM_INFO si;
@@ -37,12 +38,10 @@ __declspec(dllexport) int __cdecl MemReplaceStringA(const char *search, const ch
     if (len == 0 || len != strlen(replace))
         return -1;
 
-    // Границы пользовательского адресного пространства процесса
     GetSystemInfo(&si);
     addr = (unsigned char *)si.lpMinimumApplicationAddress;
     limit = (unsigned char *)si.lpMaximumApplicationAddress;
 
-    // Обход регионов памяти через VirtualQuery
     while (addr < limit) {
         MEMORY_BASIC_INFORMATION mbi;
         SIZE_T pos;
@@ -50,21 +49,13 @@ __declspec(dllexport) int __cdecl MemReplaceStringA(const char *search, const ch
         if (VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi))
             break;
 
-        // Только переданные в память регионы, куда разрешена запись
-        if (mbi.State == MEM_COMMIT && PageWritable(mbi.Protect) && mbi.RegionSize >= len) {
+        if (mbi.State == MEM_COMMIT && RegionWritable(mbi.Protect) && mbi.RegionSize >= len) {
             unsigned char *base = (unsigned char *)mbi.BaseAddress;
             for (pos = 0; pos + len <= mbi.RegionSize; ++pos) {
                 if (memcmp(base + pos, search, len) != 0)
                     continue;
-                {
-                    DWORD old = 0;
-                    // Временно разрешаем запись, подменяем байты, восстанавливаем права
-                    if (!VirtualProtect(base + pos, len, PAGE_READWRITE, &old))
-                        continue;
-                    memcpy(base + pos, replace, len);
-                    VirtualProtect(base + pos, len, old, &old);
-                    count++;
-                }
+                memcpy(base + pos, replace, len);
+                count++;
             }
         }
 
@@ -74,20 +65,21 @@ __declspec(dllexport) int __cdecl MemReplaceStringA(const char *search, const ch
     return count;
 }
 
-// Точка входа для CreateRemoteThread в чужом процессе (после LoadLibraryW)
+// lpParameter — указатель на MemReplaceRemoteParams в памяти мишени (find / replace)
 __declspec(dllexport) DWORD WINAPI MemReplaceRemoteEntry(LPVOID lpParameter)
 {
+    MemReplaceRemoteParams *params = (MemReplaceRemoteParams *)lpParameter;
     int count;
 
-    (void)lpParameter;
-    count = MemReplaceStringA(LAB5_SEARCH, LAB5_REPLACE);
+    if (!params || !params->find[0])
+        return (DWORD)-1;
+    count = MemReplaceStringA(params->find, params->replace);
     return (count < 0) ? (DWORD)-1 : (DWORD)count;
 }
 
-// Точка входа DLL (здесь инициализация не требуется)
-BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
+BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID reserved)
 {
-    (void)hinst;
+    (void)h;
     (void)reason;
     (void)reserved;
     return TRUE;
