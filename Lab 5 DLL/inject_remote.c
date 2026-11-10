@@ -74,7 +74,7 @@ static BOOL RemoteLoadDll(HANDLE proc, DWORD pid, const wchar_t *dllPath, HMODUL
     DWORD code = 0;
     BOOL ok = FALSE;
 
-    // Выделяем память в целевом процессе под wide-путь к DLL
+    // Выделяем память в целевом процессе под путь к DLL
     remote = VirtualAllocEx(proc, NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote)
         return FALSE;

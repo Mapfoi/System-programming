@@ -169,7 +169,7 @@ DLL_EXPORT BOOL __cdecl PhysInit(const SimConfig *cfg)
         return FALSE; // не хватило памяти
 
     g_eng.bodies = (Body *)base; // начало блока
-    g_eng.meta = (BodyMeta *)(base + sb); // следом метаданные
+    g_eng.meta = (BodyMeta *)(base + sb); // метаданные
     g_eng.newAx = (double *)(base + sb + sm); // буферы ускорений
     g_eng.newAy = g_eng.newAx + MAX_BODIES; // вторая половина sa
     g_eng.virtualBytes = total; // для SimStats

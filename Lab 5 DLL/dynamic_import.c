@@ -11,7 +11,6 @@ typedef int (__cdecl *PFN_MemReplaceStringA)(const char *, const char *);
 
 static volatile char g_buffer[] = LAB5_SEARCH;
 
-// Пауза перед закрытием консоли (после wprintf нужен текстовый режим stdout)
 static void WaitConsole(void)
 {
     fflush(stdout);
