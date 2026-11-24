@@ -130,9 +130,10 @@ DWORD WINAPI ThreadProc(LPVOID lpParameter);  /* соглашение WINAPI (st
 |-----------|----------------------------------|----------------------|
 | **Lab5Static** | свой | таблица импорта, линковка при сборке |
 | **Lab5Dynamic** | свой | `LoadLibraryW` → `GetProcAddress` |
-| **Lab5Inject** | **чужой** (Target) | удалённый `LoadLibraryW` + удалённый вызов экспорта |
+| **Lab5Inject** | **чужой** (Target) | `memreplace.dll`, `MemReplaceRemoteEntry` |
+| **Lab5InjectNotepad** | **чужой** (notepad.exe) | `memreplace_notepad.dll`, `NotepadRemoteEntry` |
 
-**Lab5Dynamic** не принимает PID и **не** меняет память Target — только демонстрация явной загрузки в своём процессе. Для мишени используется **`Lab5Inject.exe <PID>`** (PID печатает **Lab5Target**).
+**Lab5Dynamic** не принимает PID и **не** меняет память Target — только демонстрация явной загрузки в своём процессе. Для мишени: **`Lab5Inject.exe <PID> <find> <replace>`** (PID печатает **Lab5Target**).
 
 ### Замечания по безопасности и этике
 
@@ -153,7 +154,9 @@ DWORD WINAPI ThreadProc(LPVOID lpParameter);  /* соглашение WINAPI (st
 
 | Файл | Назначение |
 |------|------------|
-| `memreplace_dll.c` | DLL: `MemReplaceStringA`, `MemReplaceRemoteEntry`, `DllMain` |
+| `memreplace_dll.c` | `memreplace.dll` — VirtualQuery, `MemReplaceStringA`, `MemReplaceRemoteEntry` |
+| `notepad_dll.c` | `memreplace_notepad.dll` — классический Блокнот, `NotepadRemoteEntry` |
+| `inject_notepad.c` | `Lab5InjectNotepad.exe` → `memreplace_notepad.dll` |
 | `static_import.c` | статический импорт `MemReplaceStringA` |
 | `dynamic_import.c` | динамическая загрузка, пауза перед `FreeLibrary` |
 | `inject_remote.c` | два удалённых потока: загрузка DLL и вызов экспорта |
@@ -166,11 +169,11 @@ DWORD WINAPI ThreadProc(LPVOID lpParameter);  /* соглашение WINAPI (st
 
 ## Как это реализовано в коде
 
-**DLL.** Цикл `VirtualQuery` по адресному пространству **текущего** процесса; в committed-регионах с записью — поиск и замена с `VirtualProtect` / `memcpy`.
+**memreplace.dll.** `MemReplaceStringA` + `MemReplaceRemoteEntry` (только ANSI-скан памяти) — **Lab5Target**, Static/Dynamic.
 
-**Static / Dynamic.** Вызов `MemReplaceStringA` в локальном буфере; Dynamic дополнительно строит путь к `memreplace.dll` рядом с EXE.
+**memreplace_notepad.dll.** `NotepadRemoteEntry` — окно `Notepad`/`Edit`, `GetWindowTextW`/`SetWindowTextW`; отдельно от лабораторной DLL.
 
-**Inject.** Два удалённых потока: (1) `LoadLibraryW` — DLL в мишени, срабатывает только `DllMain`; (2) `MemReplaceRemoteEntry` — замена строки через `MemReplaceStringA` в памяти Target. Между ними — поиск базы модуля и перенос адреса экспорта по смещению.
+**Inject.** `Lab5Inject` + Target; `Lab5InjectNotepad` + `notepad.exe` (`Lab5OldString!!`). Каждый EXE грузит **свою** DLL из той же папки сборки.
 
 ---
 
@@ -189,10 +192,11 @@ cmake --build "Lab 5 DLL/build"
 Lab5Static.exe
 Lab5Dynamic.exe
 Lab5Target.exe
-Lab5Inject.exe <PID_из_вывода_Target>
+Lab5Inject.exe <PID> <find> <replace>
+Lab5InjectNotepad.exe <PID> <find> <replace>
 ```
 
-Порядок проверки инжекции: запустить **Lab5Target**, скопировать PID, запустить **Lab5Inject** с этим PID — в окне Target должна смениться строка.
+Порядок: `Lab5Inject <PID> <find> <replace>` / `Lab5InjectNotepad <PID> <find> <replace>` — **find** и **replace** одной длины. Пример: `Lab5OldString!!` `Lab5NewString!!`. Сборка: `cmake-build-debug`.
 
 ---
 

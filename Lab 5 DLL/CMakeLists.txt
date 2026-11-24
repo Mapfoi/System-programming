@@ -8,25 +8,29 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 add_library(memreplace SHARED memreplace_dll.c)
-set_target_properties(memreplace PROPERTIES
-    PREFIX ""
-    OUTPUT_NAME "memreplace"
-)
+set_target_properties(memreplace PROPERTIES PREFIX "" OUTPUT_NAME "memreplace")
+
+add_library(memreplace_notepad SHARED notepad_dll.c)
+set_target_properties(memreplace_notepad PROPERTIES PREFIX "" OUTPUT_NAME "memreplace_notepad")
 
 if (MSVC)
     target_compile_options(memreplace PRIVATE /W3 /utf-8)
+    target_compile_options(memreplace_notepad PRIVATE /W3 /utf-8)
 else ()
     target_compile_options(memreplace PRIVATE -Wall -Wextra)
+    target_compile_options(memreplace_notepad PRIVATE -Wall -Wextra)
 endif ()
 
 target_link_libraries(memreplace PRIVATE kernel32)
+target_link_libraries(memreplace_notepad PRIVATE kernel32 user32)
 
 add_executable(Lab5Static static_import.c)
 add_executable(Lab5Dynamic dynamic_import.c)
 add_executable(Lab5Target target_host.c)
 add_executable(Lab5Inject inject_remote.c)
+add_executable(Lab5InjectNotepad inject_notepad.c)
 
-foreach (t Lab5Static Lab5Dynamic Lab5Target Lab5Inject)
+foreach (t Lab5Static Lab5Dynamic Lab5Target Lab5Inject Lab5InjectNotepad)
     if (MSVC)
         target_compile_options(${t} PRIVATE /W3 /utf-8)
     else ()
@@ -38,7 +42,9 @@ target_link_libraries(Lab5Static PRIVATE memreplace kernel32)
 target_link_libraries(Lab5Dynamic PRIVATE kernel32)
 target_link_libraries(Lab5Target PRIVATE kernel32)
 target_link_libraries(Lab5Inject PRIVATE kernel32)
+target_link_libraries(Lab5InjectNotepad PRIVATE kernel32)
 
 add_dependencies(Lab5Static memreplace)
 add_dependencies(Lab5Dynamic memreplace)
 add_dependencies(Lab5Inject memreplace)
+add_dependencies(Lab5InjectNotepad memreplace_notepad)
